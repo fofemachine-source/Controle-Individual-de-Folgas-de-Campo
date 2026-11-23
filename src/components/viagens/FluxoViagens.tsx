@@ -9,23 +9,39 @@ import {
   AlertCircle,
   Plus,
   Copy,
-  Building,
-  Home,
-  Clock,
-  ArrowRight,
-  Filter,
   Search,
   Calendar,
   X,
   Edit2,
-  Trash2,
-  RefreshCw,
   Ban,
-  FileSpreadsheet,
+  Flag,
+  Paperclip,
+  Upload,
+  Lock,
+  Unlock,
+  Car,
+  Bus,
 } from 'lucide-react';
 import { formatarDataBR, diffEmDias } from '../../utils/dateUtils';
 import { formatarMoeda, parseMoeda } from '../../utils/formatters';
-import { EtapaViagem, Viagem, OcorrenciaViagem, TipoHospedagem } from '../../types';
+import {
+  EtapaViagem,
+  Viagem,
+  OcorrenciaViagem,
+  TipoHospedagem,
+  Operacao,
+  OPERACOES,
+  AnexoDocumento,
+  ChaveAnexo,
+} from '../../types';
+import {
+  avaliarDocumentosViagem,
+  obterNecessidadesTransporte,
+  derivarTipoTransporte,
+  lerArquivoComoAnexo,
+} from '../../utils/viagemUtils';
+import { EtapaAtualModal } from './EtapaAtualModal';
+import { CalendarioViagens } from './CalendarioViagens';
 
 export const FluxoViagens: React.FC = () => {
   const {
@@ -34,21 +50,25 @@ export const FluxoViagens: React.FC = () => {
     avancarEtapaViagem,
     retrocederEtapaViagem,
     atualizarViagem,
-    removerViagem,
     cancelarViagem,
     enviarLoteAprovacao,
     aprovadorNome,
     setAprovadorNome,
     criarViagem,
     hoje,
+    isAdmin,
   } = useApp();
 
-  const [modoVisualizacao, setModoVisualizacao] = useState<'tabela' | 'pipeline'>('tabela');
+  const [modoVisualizacao, setModoVisualizacao] = useState<'tabela' | 'pipeline' | 'calendario'>('tabela');
   const [busca, setBusca] = useState('');
   const [filtroEtapa, setFiltroEtapa] = useState<'todas' | EtapaViagem | 'canceladas'>('todas');
   const [viagensSelecionadas, setViagensSelecionadas] = useState<string[]>([]);
+  const [alertaFluxo, setAlertaFluxo] = useState<string | null>(null);
 
-  // Modais
+  // Nova Janela: Etapa Atual
+  const [etapaAtualViagemId, setEtapaAtualViagemId] = useState<string | null>(null);
+
+  // Modal Passagem Comprada (com suporte a anexos)
   const [modalPassagemViagemId, setModalPassagemViagemId] = useState<string | null>(null);
   const [custoPassagemInput, setCustoPassagemInput] = useState('');
   const [voucherInput, setVoucherInput] = useState('');
@@ -56,6 +76,7 @@ export const FluxoViagens: React.FC = () => {
   const [tipoHospInput, setTipoHospInput] = useState<TipoHospedagem>('República');
   const [localHospInput, setLocalHospInput] = useState('');
   const [custoHospInput, setCustoHospInput] = useState('');
+  const [anexosPassagemTemp, setAnexosPassagemTemp] = useState<Partial<Record<ChaveAnexo, AnexoDocumento>>>({});
   const [erroPassagem, setErroPassagem] = useState<string | null>(null);
 
   // Modal Envio Lote Aprovação
@@ -65,6 +86,7 @@ export const FluxoViagens: React.FC = () => {
 
   // Modal Nova / Editar Viagem
   const [modalEditarViagem, setModalEditarViagem] = useState<Viagem | null>(null);
+  const [editarSomenteIdaDestravado, setEditarSomenteIdaDestravado] = useState(false);
   const [erroEdicaoViagem, setErroEdicaoViagem] = useState<string | null>(null);
   const [erroNovaViagem, setErroNovaViagem] = useState<string | null>(null);
   const [viagemParaCancelar, setViagemParaCancelar] = useState<Viagem | null>(null);
@@ -72,13 +94,23 @@ export const FluxoViagens: React.FC = () => {
 
   // Formulário Nova Viagem
   const [novaColabId, setNovaColabId] = useState('');
+  const [novaOperacao, setNovaOperacao] = useState<Operacao>('UMCA');
+  const [novaCentroCusto, setNovaCentroCusto] = useState('UMCA');
   const [novaIda, setNovaIda] = useState(hoje);
   const [novaVolta, setNovaVolta] = useState('');
+  const [novaSomenteIda, setNovaSomenteIda] = useState(false);
+  const [novaSomenteIdaDestravado, setNovaSomenteIdaDestravado] = useState(false);
   const [novaMotivo, setNovaMotivo] = useState<Viagem['motivo']>('Folga de campo');
-  const [novaTransporte, setNovaTransporte] = useState<Viagem['transporte']>('Aéreo');
+  const [novaNecessitaTaxi, setNovaNecessitaTaxi] = useState(true);
+  const [novaNecessitaAereo, setNovaNecessitaAereo] = useState(true);
+  const [novaNecessitaRodoviario, setNovaNecessitaRodoviario] = useState(false);
   const [novaOrigem, setNovaOrigem] = useState('Parauapebas');
   const [novaDestino, setNovaDestino] = useState('');
   const [novaSolicitante, setNovaSolicitante] = useState('Logística UMCA');
+  const [novaAcessoObra, setNovaAcessoObra] = useState(false);
+  const [novaHospedagem, setNovaHospedagem] = useState(false);
+  const [novaTipoHosp, setNovaTipoHosp] = useState<TipoHospedagem>('Hotel');
+  const [novaLocalHosp, setNovaLocalHosp] = useState('');
   const [novaDataPrioritaria, setNovaDataPrioritaria] = useState(false);
   const [novaFolgaConforme, setNovaFolgaConforme] = useState(true);
   const [novaObs, setNovaObs] = useState('');
@@ -91,14 +123,16 @@ export const FluxoViagens: React.FC = () => {
     { id: 'realizada', nome: '5. Realizada', cor: 'border-emerald-300 text-emerald-800 bg-emerald-50' },
   ];
 
-  // Helper para buscar colaborador
   const getColab = (cId: string) => colaboradores.find(c => c.id === cId);
+  const getNomePassageiro = (v: Viagem) =>
+    v.passageiroNomeAvulso || getColab(v.colabId)?.nome || 'Não identificado';
 
   // Filtragem
   const viagensFiltradas = useMemo(() => {
     return viagens.filter(v => {
       const colab = getColab(v.colabId);
-      const texto = `${colab?.nome || ''} ${colab?.chapa || ''} ${v.origem} ${v.destino} ${v.voucher || ''}`.toLowerCase();
+      const nome = getNomePassageiro(v);
+      const texto = `${nome} ${colab?.chapa || ''} ${v.origem} ${v.destino} ${v.voucher || ''} ${v.centroCusto || ''} ${v.operacao || ''}`.toLowerCase();
       const matchBusca = texto.includes(busca.toLowerCase());
       if (!matchBusca) return false;
 
@@ -113,21 +147,43 @@ export const FluxoViagens: React.FC = () => {
     });
   }, [viagens, colaboradores, busca, filtroEtapa]);
 
-  // Ação de avançar etapa com verificação
+  const abrirModalPassagem = (v: Viagem) => {
+    setModalPassagemViagemId(v.id);
+    setCustoPassagemInput(v.custoPassagem ? String(v.custoPassagem) : '');
+    setVoucherInput(v.voucher || '');
+    setHospedagemInput(v.hospedagem);
+    setTipoHospInput(v.tipoHosp !== 'N.A' ? v.tipoHosp : 'Hotel');
+    setLocalHospInput(v.localHosp !== 'N.A' ? v.localHosp : '');
+    setCustoHospInput(v.custoHospedagem ? String(v.custoHospedagem) : '');
+    setAnexosPassagemTemp({});
+    setErroPassagem(null);
+  };
+
+  // Ação de avançar etapa com verificação de documentos obrigatórios
   const handleAvancarOK = (v: Viagem) => {
+    setAlertaFluxo(null);
     if (v.etapa === 'aprovada') {
-      // Próxima é "comprada" -> Abre modal de preenchimento obrigatório de custos
-      setModalPassagemViagemId(v.id);
-      setCustoPassagemInput(v.custoPassagem ? String(v.custoPassagem) : '');
-      setVoucherInput(v.voucher || '');
-      setHospedagemInput(v.hospedagem);
-      setTipoHospInput(v.tipoHosp || 'República');
-      setLocalHospInput(v.localHosp || '');
-      setCustoHospInput(v.custoHospedagem ? String(v.custoHospedagem) : '');
+      abrirModalPassagem(v);
       return;
     }
 
-    avancarEtapaViagem(v.id);
+    const res = avancarEtapaViagem(v.id);
+    if (!res.ok && res.erro) {
+      setAlertaFluxo(res.erro);
+      // Abre automaticamente a janela Etapa Atual para o usuário anexar os documentos faltantes
+      setEtapaAtualViagemId(v.id);
+    }
+  };
+
+  const handleUploadNoModalPassagem = async (chave: ChaveAnexo, file?: File) => {
+    if (!file) return;
+    setErroPassagem(null);
+    try {
+      const anexo = await lerArquivoComoAnexo(file, hoje);
+      setAnexosPassagemTemp(prev => ({ ...prev, [chave]: anexo }));
+    } catch (err: any) {
+      setErroPassagem(err?.message || 'Erro ao carregar arquivo.');
+    }
   };
 
   const handleSalvarPassagemComprada = (e: React.FormEvent) => {
@@ -145,25 +201,29 @@ export const FluxoViagens: React.FC = () => {
     }
     setErroPassagem(null);
 
-    const sucesso = avancarEtapaViagem(modalPassagemViagemId, {
+    const res = avancarEtapaViagem(modalPassagemViagemId, {
       custoPassagem: custo,
       voucher: voucherInput.trim(),
       hospedagem: hospedagemInput,
       tipoHosp: hospedagemInput ? tipoHospInput : 'N.A',
       localHosp: hospedagemInput ? localHospInput : 'N.A',
       custoHospedagem: hospedagemInput && custoHospInput ? parseMoeda(custoHospInput) : null,
+      anexosNovos: anexosPassagemTemp,
     });
 
-    if (sucesso) {
+    if (res.ok) {
       setModalPassagemViagemId(null);
+    } else if (res.erro) {
+      setErroPassagem(res.erro);
     }
   };
 
   // Enviar Lote para Aprovação
   const handleDispararEnvioAprovacao = () => {
-    const idsParaEnviar = viagensSelecionadas.length > 0
-      ? viagensSelecionadas
-      : viagens.filter(v => v.etapa === 'programada' && v.ocorrencia !== 'Cancelada').map(v => v.id);
+    const idsParaEnviar =
+      viagensSelecionadas.length > 0
+        ? viagensSelecionadas
+        : viagens.filter(v => v.etapa === 'programada' && v.ocorrencia !== 'Cancelada').map(v => v.id);
 
     if (idsParaEnviar.length === 0) {
       setAvisoLoteVazio('Nenhuma viagem na etapa "Programada" selecionada.');
@@ -185,13 +245,25 @@ export const FluxoViagens: React.FC = () => {
   };
 
   const handleAbrirNovaViagem = () => {
-    setNovaColabId(colaboradores[0]?.id || '');
-    setErroNovaViagem(null);
     const c = colaboradores[0];
+    setNovaColabId(c?.id || '');
+    setErroNovaViagem(null);
+    setNovaSomenteIda(false);
+    setNovaSomenteIdaDestravado(false);
+    setNovaAcessoObra(false);
+    setNovaHospedagem(false);
+    setNovaTipoHosp('Hotel');
+    setNovaLocalHosp('');
     if (c) {
+      const op = c.operacao || 'UMCA';
+      setNovaOperacao(op);
+      setNovaCentroCusto(c.centroCusto || op);
       setNovaOrigem(c.origem);
       setNovaDestino(c.destino);
-      setNovaTransporte(c.transporte);
+      setNovaNecessitaAereo(c.transporte.includes('Aéreo'));
+      setNovaNecessitaRodoviario(c.transporte.includes('Rodoviário'));
+      setNovaNecessitaTaxi(c.beneficios.toLowerCase().includes('táxi'));
+      setNovaSolicitante(`Logística ${op}`);
       setNovaIda(hoje);
       setNovaVolta(new Date(new Date(hoje).getTime() + c.folga * 86400000).toISOString().split('T')[0]);
     }
@@ -201,57 +273,109 @@ export const FluxoViagens: React.FC = () => {
   const handleSalvarNovaViagem = (e: React.FormEvent) => {
     e.preventDefault();
     setErroNovaViagem(null);
-    if (!novaColabId || !novaIda || !novaVolta) {
+    const efetivoSomenteIda = isAdmin && novaSomenteIdaDestravado ? novaSomenteIda : false;
+
+    if (!novaColabId || !novaIda || (!efetivoSomenteIda && !novaVolta)) {
       setErroNovaViagem('Preencha os campos obrigatórios (Colaborador, Data de Ida e Volta).');
       return;
     }
-    if (novaVolta < novaIda) {
+    if (!efetivoSomenteIda && novaVolta < novaIda) {
       setErroNovaViagem('Validação: A data de volta não pode ser anterior à data de ida.');
+      return;
+    }
+    if (!novaNecessitaAereo && !novaNecessitaRodoviario && !novaNecessitaTaxi) {
+      setErroNovaViagem('Marque ao menos uma necessidade de transporte (Táxi, Aéreo ou Rodoviário).');
       return;
     }
 
     const colab = getColab(novaColabId);
+    const transporte = derivarTipoTransporte(novaNecessitaAereo, novaNecessitaRodoviario);
 
     criarViagem({
       colabId: novaColabId,
+      operacao: novaOperacao,
       etapa: 'programada',
       motivo: novaMotivo,
       dataSolicitacao: hoje,
       ida: novaIda,
-      volta: novaVolta,
+      volta: efetivoSomenteIda ? '' : novaVolta,
+      somenteIda: efetivoSomenteIda,
       origem: novaOrigem,
       destino: novaDestino,
-      transporte: novaTransporte,
+      transporte,
+      necessitaTaxi: novaNecessitaTaxi,
+      necessitaAereo: novaNecessitaAereo,
+      necessitaRodoviario: novaNecessitaRodoviario,
       solicitante: novaSolicitante,
       custoPassagem: null,
       voucher: '',
-      hospedagem: novaTransporte.includes('Aéreo'),
-      tipoHosp: novaTransporte.includes('Aéreo') ? 'República' : 'N.A',
-      localHosp: novaTransporte.includes('Aéreo') ? 'República UMCA' : 'N.A',
+      hospedagem: novaHospedagem,
+      tipoHosp: novaHospedagem ? novaTipoHosp : 'N.A',
+      localHosp: novaHospedagem ? novaLocalHosp || 'A definir' : 'N.A',
       custoHospedagem: null,
       ocorrencia: 'Sem alteração',
       dataPrioritaria: novaDataPrioritaria,
       folgaConforme: novaFolgaConforme,
       obs: novaObs,
       tipoColaborador: colab?.tipo || 'U&M',
-      centroCusto: 'UMCA',
+      centroCusto: (novaCentroCusto || novaOperacao).trim().toUpperCase(),
+      acessoObra: novaAcessoObra,
+      obraLocal: novaAcessoObra ? novaOperacao : undefined,
+      qrCode: novaAcessoObra,
+      anexos: {},
     });
 
     setModalNovaViagem(false);
+  };
+
+  const handleAbrirEditarViagem = (v: Viagem) => {
+    const { necessitaTaxi, necessitaAereo, necessitaRodoviario } = obterNecessidadesTransporte(v);
+    setModalEditarViagem({
+      ...v,
+      necessitaTaxi,
+      necessitaAereo,
+      necessitaRodoviario,
+      somenteIda: Boolean(v.somenteIda),
+    });
+    setEditarSomenteIdaDestravado(false);
+    setErroEdicaoViagem(null);
   };
 
   const handleSalvarEdicaoViagem = (e: React.FormEvent) => {
     e.preventDefault();
     setErroEdicaoViagem(null);
     if (!modalEditarViagem) return;
-    if (modalEditarViagem.volta < modalEditarViagem.ida) {
-      setErroEdicaoViagem('Validação: A data de volta não pode ser anterior à data de ida.');
+    const efetivoSomenteIda =
+      isAdmin && editarSomenteIdaDestravado ? Boolean(modalEditarViagem.somenteIda) : false;
+
+    if (!efetivoSomenteIda && (!modalEditarViagem.volta || modalEditarViagem.volta < modalEditarViagem.ida)) {
+      setErroEdicaoViagem('Validação: Informe uma data de volta igual ou posterior à data de ida.');
       return;
     }
 
-    atualizarViagem(modalEditarViagem.id, modalEditarViagem);
+    const transporte = derivarTipoTransporte(
+      Boolean(modalEditarViagem.necessitaAereo),
+      Boolean(modalEditarViagem.necessitaRodoviario)
+    );
+
+    const res = atualizarViagem(modalEditarViagem.id, {
+      ...modalEditarViagem,
+      somenteIda: efetivoSomenteIda,
+      volta: efetivoSomenteIda ? '' : modalEditarViagem.volta,
+      transporte,
+    });
+
+    if (!res.ok && res.erro) {
+      setErroEdicaoViagem(res.erro);
+      return;
+    }
+
     setModalEditarViagem(null);
   };
+
+  const viagemEtapaAtualSelecionada = etapaAtualViagemId
+    ? viagens.find(v => v.id === etapaAtualViagemId) || null
+    : null;
 
   return (
     <div className="space-y-6">
@@ -264,14 +388,14 @@ export const FluxoViagens: React.FC = () => {
                 Aba Oficial
               </span>
               <span className="text-xs text-slate-500 font-mono">
-                BASE_INDICADORES · Fluxo de Etapas
+                BASE_INDICADORES · Fluxo, Anexos & Calendário de Planejamento
               </span>
             </div>
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 mt-1">
-              Gestão de Viagens & Esteira de Aprovações
+              Gestão de Viagens, Planejamento & Etapa Atual
             </h1>
             <p className="mt-1 text-xs sm:text-sm text-slate-600">
-              Fluxo ordenado: 1. Programada &rarr; 2. Enviada para aprovação &rarr; 3. Aprovada &rarr; 4. Passagem comprada &rarr; 5. Realizada.
+              Acompanhe cada viagem com flags na janela <strong>Etapa Atual</strong>, anexe documentos obrigatórios (PDF Hotel, QR Code, Voucher Aéreo) e otimize voos/táxis no <strong>Calendário</strong>.
             </p>
           </div>
 
@@ -301,11 +425,27 @@ export const FluxoViagens: React.FC = () => {
             <span>{avisoLoteVazio}</span>
           </div>
         )}
+
+        {alertaFluxo && (
+          <div className="mt-3 p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-lg flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{alertaFluxo}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAlertaFluxo(null)}
+              className="text-rose-500 hover:text-rose-800 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Controles de Filtro e Modos de Visualização */}
+      {/* Controles de Filtro e Modos de Visualização (Tabela | Esteira Kanban | Calendário) */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs">
           {/* Filtros de Etapa */}
           <div className="flex flex-wrap items-center gap-1.5">
             <button
@@ -348,13 +488,13 @@ export const FluxoViagens: React.FC = () => {
             </button>
           </div>
 
-          {/* Busca e Alternância Tabela/Pipeline */}
-          <div className="flex items-center gap-2">
-            <div className="relative w-full sm:w-56">
+          {/* Busca e Alternância Tabela / Kanban / Calendário */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative w-full sm:w-52">
               <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 type="text"
-                placeholder="Buscar por nome, chapa, trecho..."
+                placeholder="Buscar nome, CC, trecho..."
                 value={busca}
                 onChange={e => setBusca(e.target.value)}
                 className="w-full bg-slate-50 border border-slate-300 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-500"
@@ -365,7 +505,7 @@ export const FluxoViagens: React.FC = () => {
               <button
                 onClick={() => setModoVisualizacao('tabela')}
                 className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
-                  modoVisualizacao === 'tabela' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                  modoVisualizacao === 'tabela' ? 'bg-white text-slate-900 shadow-xs font-semibold' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
                 Tabela
@@ -373,17 +513,36 @@ export const FluxoViagens: React.FC = () => {
               <button
                 onClick={() => setModoVisualizacao('pipeline')}
                 className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
-                  modoVisualizacao === 'pipeline' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                  modoVisualizacao === 'pipeline' ? 'bg-white text-slate-900 shadow-xs font-semibold' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                Esteira Kanban
+                Kanban
+              </button>
+              <button
+                onClick={() => setModoVisualizacao('calendario')}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
+                  modoVisualizacao === 'calendario' ? 'bg-blue-600 text-white shadow-xs font-semibold' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                <span>Calendário</span>
               </button>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Visão 1: Tabela Completa (Regulamentar CAN) */}
+      {/* Visão 3: Calendário de Planejamento de Viagens */}
+      {modoVisualizacao === 'calendario' && (
+        <CalendarioViagens
+          viagens={viagensFiltradas}
+          colaboradores={colaboradores}
+          hoje={hoje}
+          onAbrirEtapaAtual={v => setEtapaAtualViagemId(v.id)}
+        />
+      )}
+
+      {/* Visão 1: Tabela Completa */}
       {modoVisualizacao === 'tabela' && (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
           <div className="overflow-x-auto">
@@ -410,32 +569,33 @@ export const FluxoViagens: React.FC = () => {
                       title="Selecionar viagens programadas"
                     />
                   </th>
-                  <th className="py-3 px-3">Colaborador</th>
-                  <th className="py-3 px-3">Etapa Atual</th>
+                  <th className="py-3 px-3">Colaborador / CC</th>
+                  <th className="py-3 px-3">Etapa Atual (Flags)</th>
                   <th className="py-3 px-3">Data Ida / Volta</th>
-                  <th className="py-3 px-3">Trecho & Transporte</th>
-                  <th className="py-3 px-3">Prazo (Antecedência)</th>
-                  <th className="py-3 px-3">Hospedagem</th>
-                  <th className="py-3 px-3">Custos (Passagem / Hosp.)</th>
-                  <th className="py-3 px-3">Voucher / Ocorrência</th>
-                  <th className="py-3 px-3 text-right">Avançar Fluxo</th>
+                  <th className="py-3 px-3">Trecho & Necessidades</th>
+                  <th className="py-3 px-3">Docs & Anexos</th>
+                  <th className="py-3 px-3">Prazo</th>
+                  <th className="py-3 px-3">Custos</th>
+                  <th className="py-3 px-3 text-right">Ações</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {viagensFiltradas.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="py-10 text-center text-slate-500">
+                    <td colSpan={9} className="py-10 text-center text-slate-500">
                       Nenhuma viagem encontrada para este filtro.
                     </td>
                   </tr>
                 ) : (
                   viagensFiltradas.map(v => {
                     const colab = getColab(v.colabId);
+                    const nomeExib = getNomePassageiro(v);
                     const antecedencia = diffEmDias(v.ida, v.dataSolicitacao);
                     const dentroDoPrazo = antecedencia >= 20;
-                    const ordemEtapas: EtapaViagem[] = ['programada', 'enviada', 'aprovada', 'comprada', 'realizada'];
-                    const idxEtapa = ordemEtapas.indexOf(v.etapa);
                     const isCancelada = v.ocorrencia === 'Cancelada';
+                    const avaliacao = avaliarDocumentosViagem(v);
+                    const { necessitaTaxi, necessitaAereo, necessitaRodoviario } = obterNecessidadesTransporte(v);
+                    const anexosCount = Object.values(v.anexos || {}).filter(Boolean).length;
 
                     return (
                       <tr
@@ -466,99 +626,131 @@ export const FluxoViagens: React.FC = () => {
                           )}
                         </td>
 
-                        {/* Colaborador */}
+                        {/* Colaborador & Centro de Custo */}
                         <td className="py-3 px-3">
-                          <div className="font-semibold text-slate-900">{colab?.nome || 'Não identificado'}</div>
-                          <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
-                            <span className="font-mono">Chapa {colab?.chapa || '—'}</span>
-                            <span>·</span>
-                            <span>{v.motivo}</span>
+                          <div className="font-semibold text-slate-900">{nomeExib}</div>
+                          <div className="text-[11px] text-slate-500 flex flex-wrap items-center gap-1.5 mt-0.5">
+                            <span className="font-mono font-bold px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-800 border border-indigo-200">
+                              CC: {v.centroCusto || v.operacao || 'UMCA'}
+                            </span>
+                            {colab && <span className="font-mono">Chapa {colab.chapa}</span>}
+                            <span>· {v.motivo}</span>
                           </div>
                         </td>
 
-                        {/* Etapa com Barra de Progresso Mini */}
-                        <td className="py-3 px-3 min-w-[140px]">
-                          <div className="flex items-center gap-1 mb-1">
-                            <span
-                              className={`text-[11px] font-bold px-2 py-0.5 rounded capitalize ${
-                                v.etapa === 'realizada'
-                                  ? 'bg-emerald-100 text-emerald-800'
-                                  : v.etapa === 'comprada'
-                                  ? 'bg-blue-100 text-blue-800'
-                                  : v.etapa === 'aprovada'
-                                  ? 'bg-indigo-100 text-indigo-800'
-                                  : v.etapa === 'enviada'
-                                  ? 'bg-amber-100 text-amber-800'
-                                  : 'bg-slate-100 text-slate-700'
-                              }`}
-                            >
-                              {v.etapa}
-                            </span>
-                          </div>
-                          {/* 5-step visual indicator */}
-                          <div className="flex items-center gap-0.5 w-full">
-                            {ordemEtapas.map((step, i) => (
-                              <div
-                                key={step}
-                                className={`h-1.5 flex-1 rounded-sm ${
-                                  i <= idxEtapa
-                                    ? step === 'realizada'
-                                      ? 'bg-emerald-500'
-                                      : 'bg-blue-600'
-                                    : 'bg-slate-200'
+                        {/* Etapa Atual (Flags + Botão Janela) */}
+                        <td className="py-3 px-3 min-w-[175px]">
+                          <button
+                            type="button"
+                            onClick={() => setEtapaAtualViagemId(v.id)}
+                            className="group text-left w-full p-1.5 -m-1.5 rounded-lg hover:bg-blue-50/70 transition-colors cursor-pointer"
+                            title="Abrir janela Etapa Atual (Flags e Anexos)"
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full border ${
+                                  avaliacao.statusProcesso === 'concluida'
+                                    ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                    : avaliacao.statusProcesso === 'cancelada'
+                                    ? 'bg-rose-100 text-rose-800 border-rose-300'
+                                    : avaliacao.pendentes.length > 0 && v.etapa === 'comprada'
+                                    ? 'bg-rose-100 text-rose-800 border-rose-300'
+                                    : 'bg-amber-100 text-amber-900 border-amber-300'
                                 }`}
-                              />
-                            ))}
-                          </div>
+                              >
+                                <Flag className="w-3 h-3" />
+                                <span className="capitalize">{v.etapa}</span>
+                              </span>
+                            </div>
+                            <div className="text-[10px] font-semibold text-blue-700 group-hover:underline mt-1 flex items-center gap-1">
+                              <span>{avaliacao.statusProcessoTexto}</span>
+                            </div>
+                          </button>
                         </td>
 
                         {/* Data Ida / Volta */}
                         <td className="py-3 px-3 whitespace-nowrap">
                           <div className="font-mono font-medium text-slate-900">
-                            {formatarDataBR(v.ida)} &rarr; {formatarDataBR(v.volta)}
+                            {formatarDataBR(v.ida)} &rarr; {v.somenteIda ? 'Somente Ida' : formatarDataBR(v.volta)}
                           </div>
                           <div className="text-[11px] text-slate-400">
                             Solicitado em {formatarDataBR(v.dataSolicitacao)}
                           </div>
                         </td>
 
-                        {/* Trecho & Transporte */}
+                        {/* Trecho & Necessidades (Táxi / Aéreo / Rodoviário) */}
                         <td className="py-3 px-3">
                           <div className="text-slate-800 font-medium whitespace-nowrap">
                             {v.origem} &rarr; {v.destino}
                           </div>
-                          <div className="text-[11px] text-slate-500">{v.transporte}</div>
+                          <div className="flex flex-wrap items-center gap-1 mt-1 text-[10px] font-semibold">
+                            {necessitaAereo && (
+                              <span className="px-1.5 py-0.2 rounded bg-blue-50 text-blue-800 border border-blue-200">
+                                Aéreo
+                              </span>
+                            )}
+                            {necessitaTaxi && (
+                              <span className="px-1.5 py-0.2 rounded bg-amber-50 text-amber-900 border border-amber-200">
+                                Táxi
+                              </span>
+                            )}
+                            {necessitaRodoviario && (
+                              <span className="px-1.5 py-0.2 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                Rodov.
+                              </span>
+                            )}
+                          </div>
                         </td>
 
-                        {/* Prazo (Antecedência) */}
+                        {/* Documentos & Anexos */}
                         <td className="py-3 px-3 whitespace-nowrap">
-                          <div className="flex items-center gap-1.5">
-                            <span
-                              className={`text-[11px] font-semibold px-2 py-0.5 rounded ${
-                                dentroDoPrazo
-                                  ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                                  : 'bg-rose-50 text-rose-700 border border-rose-200 font-bold'
-                              }`}
-                            >
-                              {dentroDoPrazo ? 'Dentro do prazo' : 'Fora do prazo'}
+                          <button
+                            type="button"
+                            onClick={() => setEtapaAtualViagemId(v.id)}
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors cursor-pointer ${
+                              avaliacao.todosObrigatoriosAnexados
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                                : 'bg-rose-50 text-rose-800 border-rose-200 hover:bg-rose-100'
+                            }`}
+                            title="Clique para gerenciar anexos (PDF Reserva Hotel, QR Code, Voucher Aéreo)"
+                          >
+                            <Paperclip className="w-3.5 h-3.5" />
+                            <span>
+                              {avaliacao.obrigatorios.length === 0
+                                ? `${anexosCount} anexo(s)`
+                                : `${avaliacao.obrigatorios.length - avaliacao.pendentes.length}/${avaliacao.obrigatorios.length} obrig.`}
                             </span>
-                          </div>
-                          <div className="text-[11px] text-slate-500 font-mono mt-0.5">
-                            {antecedencia} dias de antecedência
-                          </div>
+                          </button>
+                          {v.voucher && (
+                            <div className="text-[10px] font-mono text-slate-500 mt-0.5 truncate max-w-[120px]">
+                              {v.voucher}
+                            </div>
+                          )}
                         </td>
 
-                        {/* Hospedagem */}
+                        {/* Prazo */}
                         <td className="py-3 px-3 whitespace-nowrap">
-                          {v.hospedagem ? (
-                            <div>
-                              <span className="font-semibold text-slate-800">{v.tipoHosp}</span>
-                              <div className="text-[11px] text-slate-500 truncate max-w-[140px]" title={v.localHosp}>
-                                {v.localHosp || 'Local pendente'}
-                              </div>
+                          <span
+                            className={`text-[11px] font-semibold px-2 py-0.5 rounded ${
+                              dentroDoPrazo
+                                ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                                : 'bg-rose-50 text-rose-700 border border-rose-200 font-bold'
+                            }`}
+                          >
+                            {dentroDoPrazo ? 'No prazo' : 'Fora prazo'} ({antecedencia}d)
+                          </span>
+                          {v.ocorrencia !== 'Sem alteração' && (
+                            <div className="mt-1">
+                              <span
+                                className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
+                                  v.ocorrencia === 'Remarcada'
+                                    ? 'bg-purple-100 text-purple-800'
+                                    : 'bg-rose-100 text-rose-800'
+                                }`}
+                              >
+                                {v.ocorrencia}
+                              </span>
                             </div>
-                          ) : (
-                            <span className="text-slate-400">N.A</span>
                           )}
                         </td>
 
@@ -574,37 +766,32 @@ export const FluxoViagens: React.FC = () => {
                           ) : null}
                         </td>
 
-                        {/* Voucher / Ocorrência */}
-                        <td className="py-3 px-3">
-                          {v.voucher ? (
-                            <span className="font-mono text-xs font-semibold px-1.5 py-0.5 bg-slate-100 text-slate-800 rounded border border-slate-200 block truncate max-w-[130px]">
-                              {v.voucher}
-                            </span>
-                          ) : (
-                            <span className="text-[11px] text-slate-400 italic">Pendente</span>
-                          )}
-
-                          {v.ocorrencia !== 'Sem alteração' && (
-                            <span
-                              className={`text-[10px] font-bold px-1.5 py-0.2 rounded mt-1 inline-block ${
-                                v.ocorrencia === 'Remarcada'
-                                  ? 'bg-purple-100 text-purple-800'
-                                  : 'bg-rose-100 text-rose-800'
-                              }`}
-                            >
-                              {v.ocorrencia}
-                            </span>
-                          )}
-                        </td>
-
-                        {/* Botão OK e Ações */}
+                        {/* Ações */}
                         <td className="py-3 px-3 text-right whitespace-nowrap">
                           <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setEtapaAtualViagemId(v.id)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-blue-800 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors cursor-pointer"
+                              title="Abrir janela Etapa Atual (Flags e Anexos)"
+                            >
+                              <Flag className="w-3 h-3" />
+                              <span>Etapa Atual</span>
+                            </button>
+
                             {!isCancelada && v.etapa !== 'realizada' && (
                               <button
                                 onClick={() => handleAvancarOK(v)}
-                                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 rounded-lg shadow-xs transition-colors cursor-pointer"
-                                title="Avançar para a próxima etapa (OK)"
+                                className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold text-white rounded-lg shadow-xs transition-colors cursor-pointer ${
+                                  v.etapa === 'comprada' && !avaliacao.todosObrigatoriosAnexados
+                                    ? 'bg-amber-600 hover:bg-amber-700'
+                                    : 'bg-emerald-600 hover:bg-emerald-700'
+                                }`}
+                                title={
+                                  v.etapa === 'comprada' && !avaliacao.todosObrigatoriosAnexados
+                                    ? 'Anexe os documentos obrigatórios para concluir'
+                                    : 'Avançar para a próxima etapa (OK)'
+                                }
                               >
                                 <Check className="w-3.5 h-3.5" />
                                 <span>OK</span>
@@ -618,16 +805,14 @@ export const FluxoViagens: React.FC = () => {
                               </span>
                             )}
 
-                            {/* Editar */}
                             <button
-                              onClick={() => setModalEditarViagem(v)}
+                              onClick={() => handleAbrirEditarViagem(v)}
                               className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded transition-colors cursor-pointer"
                               title="Editar dados da viagem"
                             >
                               <Edit2 className="w-3.5 h-3.5" />
                             </button>
 
-                            {/* Cancelar */}
                             {!isCancelada && (
                               <button
                                 onClick={() => setViagemParaCancelar(v)}
@@ -649,7 +834,7 @@ export const FluxoViagens: React.FC = () => {
         </div>
       )}
 
-      {/* Visão 2: Esteira Kanban (Pipeline de 5 Etapas) */}
+      {/* Visão 2: Esteira Kanban */}
       {modoVisualizacao === 'pipeline' && (
         <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
           {etapas.map((etapa, idx) => {
@@ -662,7 +847,6 @@ export const FluxoViagens: React.FC = () => {
                 key={etapa.id}
                 className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-col min-h-[500px]"
               >
-                {/* Cabeçalho da Etapa */}
                 <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-200">
                   <span className="text-xs font-bold text-slate-900">{etapa.nome}</span>
                   <span className="text-xs font-mono font-bold bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700">
@@ -670,7 +854,6 @@ export const FluxoViagens: React.FC = () => {
                   </span>
                 </div>
 
-                {/* Cards das Viagens */}
                 <div className="space-y-2.5 flex-1 overflow-y-auto">
                   {viagensNestaEtapa.length === 0 ? (
                     <div className="h-28 flex items-center justify-center text-[11px] text-slate-400 border border-dashed border-slate-200 rounded-lg">
@@ -679,8 +862,10 @@ export const FluxoViagens: React.FC = () => {
                   ) : (
                     viagensNestaEtapa.map(v => {
                       const colab = getColab(v.colabId);
+                      const nomeExib = getNomePassageiro(v);
                       const antecedencia = diffEmDias(v.ida, v.dataSolicitacao);
                       const dentroDoPrazo = antecedencia >= 20;
+                      const avaliacao = avaliarDocumentosViagem(v);
 
                       return (
                         <div
@@ -689,14 +874,15 @@ export const FluxoViagens: React.FC = () => {
                         >
                           <div className="flex items-start justify-between gap-1">
                             <div>
-                              <div className="font-semibold text-xs text-slate-900">{colab?.nome}</div>
-                              <div className="text-[10px] text-slate-400 font-mono">Chapa {colab?.chapa}</div>
+                              <div className="font-semibold text-xs text-slate-900">{nomeExib}</div>
+                              <div className="text-[10px] text-slate-500 font-mono">
+                                CC: {v.centroCusto || v.operacao || 'UMCA'}
+                                {colab ? ` · Chapa ${colab.chapa}` : ''}
+                              </div>
                             </div>
                             <span
                               className={`text-[9px] font-bold px-1.5 py-0.2 rounded ${
-                                dentroDoPrazo
-                                  ? 'bg-blue-50 text-blue-700'
-                                  : 'bg-rose-50 text-rose-700'
+                                dentroDoPrazo ? 'bg-blue-50 text-blue-700' : 'bg-rose-50 text-rose-700'
                               }`}
                             >
                               {dentroDoPrazo ? '≥20d' : '<20d'}
@@ -705,21 +891,33 @@ export const FluxoViagens: React.FC = () => {
 
                           <div className="text-[11px] text-slate-600 bg-slate-50 p-1.5 rounded font-mono">
                             <div>Ida: {formatarDataBR(v.ida)}</div>
-                            <div>Volta: {formatarDataBR(v.volta)}</div>
+                            <div>Volta: {v.somenteIda ? 'Somente Ida' : formatarDataBR(v.volta)}</div>
                           </div>
 
                           <div className="text-[11px] text-slate-700 font-medium">
                             {v.origem} &rarr; {v.destino}
-                            <span className="text-[10px] text-slate-400 block font-normal">
-                              {v.transporte}
-                            </span>
                           </div>
 
-                          {v.voucher && (
-                            <div className="text-[10px] font-mono bg-blue-50 text-blue-900 px-1.5 py-0.5 rounded border border-blue-200 truncate">
-                              Voucher: {v.voucher}
-                            </div>
-                          )}
+                          {/* Flag de Documentos */}
+                          <button
+                            type="button"
+                            onClick={() => setEtapaAtualViagemId(v.id)}
+                            className={`w-full flex items-center justify-between px-2 py-1 rounded text-[10px] font-bold border cursor-pointer ${
+                              avaliacao.todosObrigatoriosAnexados
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                : 'bg-amber-50 text-amber-900 border-amber-300'
+                            }`}
+                          >
+                            <span className="flex items-center gap-1">
+                              <Flag className="w-3 h-3" />
+                              <span>Etapa Atual</span>
+                            </span>
+                            <span>
+                              {avaliacao.todosObrigatoriosAnexados
+                                ? 'Docs OK'
+                                : `${avaliacao.pendentes.length} pend.`}
+                            </span>
+                          </button>
 
                           {v.custoPassagem && (
                             <div className="text-xs font-mono font-bold text-slate-900">
@@ -727,7 +925,6 @@ export const FluxoViagens: React.FC = () => {
                             </div>
                           )}
 
-                          {/* Botão de avanço rápido */}
                           <div className="pt-1 flex items-center justify-between border-t border-slate-100">
                             {idx > 0 && (
                               <button
@@ -760,10 +957,23 @@ export const FluxoViagens: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL 1: Passagem Comprada (Exige Custo da Passagem e Voucher) */}
+      {/* NOVA JANELA: ETAPA ATUAL (Flags + Anexos Obrigatórios) */}
+      {viagemEtapaAtualSelecionada && (
+        <EtapaAtualModal
+          viagem={viagemEtapaAtualSelecionada}
+          colaborador={getColab(viagemEtapaAtualSelecionada.colabId)}
+          onClose={() => setEtapaAtualViagemId(null)}
+          onSolicitarModalPassagem={v => {
+            setEtapaAtualViagemId(null);
+            abrirModalPassagem(v);
+          }}
+        />
+      )}
+
+      {/* MODAL 1: Passagem Comprada (com upload de PDF Hotel, QR Code e Voucher Aéreo) */}
       {modalPassagemViagemId && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-4 my-6">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
                 <div className="p-2 bg-blue-100 text-blue-700 rounded-lg">
@@ -771,12 +981,12 @@ export const FluxoViagens: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="font-bold text-slate-900 text-base">Registrar Passagem Comprada</h3>
-                  <p className="text-xs text-slate-500">Etapa 4: Obrigatório registrar custo e voucher</p>
+                  <p className="text-xs text-slate-500">Etapa 4: Custos, localizador e anexos do fluxo</p>
                 </div>
               </div>
               <button
                 onClick={() => setModalPassagemViagemId(null)}
-                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg"
+                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -789,32 +999,35 @@ export const FluxoViagens: React.FC = () => {
                   <span>{erroPassagem}</span>
                 </div>
               )}
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Custo da Passagem (R$) * <span className="text-rose-500 font-normal">obrigatório</span>
-                </label>
-                <input
-                  type="text"
-                  placeholder="Ex: 1450,80"
-                  value={custoPassagemInput}
-                  onChange={e => setCustoPassagemInput(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  required
-                />
-              </div>
 
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Voucher / Código Localizador * <span className="text-rose-500 font-normal">obrigatório</span>
-                </label>
-                <input
-                  type="text"
-                  placeholder="Ex: AZUL-7789A ou ROD-PA-1234"
-                  value={voucherInput}
-                  onChange={e => setVoucherInput(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-xs font-mono font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  required
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Custo da Passagem (R$) *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: 1450,80"
+                    value={custoPassagemInput}
+                    onChange={e => setCustoPassagemInput(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Voucher / Localizador *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: AZUL-7789A"
+                    value={voucherInput}
+                    onChange={e => setVoucherInput(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-xs font-mono font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    required
+                  />
+                </div>
               </div>
 
               {/* Opções de Hospedagem */}
@@ -839,8 +1052,8 @@ export const FluxoViagens: React.FC = () => {
                           onChange={e => setTipoHospInput(e.target.value as TipoHospedagem)}
                           className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-xs text-slate-900"
                         >
-                          <option value="República">República</option>
                           <option value="Hotel">Hotel</option>
+                          <option value="República">República</option>
                         </select>
                       </div>
                       <div>
@@ -868,21 +1081,63 @@ export const FluxoViagens: React.FC = () => {
                 )}
               </div>
 
-              <div className="text-[11px] text-slate-500 bg-blue-50 p-2.5 rounded text-blue-800 border border-blue-200">
-                Ao confirmar, o colaborador ficará com a cor <strong>AZUL</strong> no Controle de Folgas e um aviso WhatsApp com os dados do bilhete será gerado na aba de Avisos.
+              {/* Upload de Documentos direto na Emissão */}
+              <div className="p-3 bg-indigo-50/50 rounded-lg border border-indigo-200 space-y-2.5">
+                <div className="font-bold text-indigo-950 flex items-center gap-1.5">
+                  <Paperclip className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Anexar Documentos do Fluxo (PDF / Imagem)</span>
+                </div>
+                {(
+                  [
+                    { chave: 'voucherAereo', label: 'Voucher Aéreo' },
+                    { chave: 'reservaHotel', label: 'PDF de Reserva de Hotel' },
+                    { chave: 'qrCodeAcesso', label: 'QR Code de Acesso' },
+                  ] as { chave: ChaveAnexo; label: string }[]
+                ).map(item => {
+                  const arq = anexosPassagemTemp[item.chave];
+                  return (
+                    <div
+                      key={item.chave}
+                      className="flex items-center justify-between gap-2 bg-white px-2.5 py-2 rounded border border-slate-200"
+                    >
+                      <div className="truncate">
+                        <div className="font-semibold text-slate-800">{item.label}</div>
+                        {arq ? (
+                          <div className="text-[10px] font-mono text-emerald-700 truncate">{arq.nome}</div>
+                        ) : (
+                          <div className="text-[10px] text-slate-400">Nenhum arquivo selecionado</div>
+                        )}
+                      </div>
+                      <label className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-white bg-slate-900 hover:bg-slate-800 rounded cursor-pointer shrink-0">
+                        <Upload className="w-3 h-3" />
+                        <span>{arq ? 'Trocar' : 'Anexar'}</span>
+                        <input
+                          type="file"
+                          accept=".pdf,image/*"
+                          className="hidden"
+                          onChange={e => {
+                            const f = e.target.files?.[0];
+                            if (f) handleUploadNoModalPassagem(item.chave, f);
+                            e.target.value = '';
+                          }}
+                        />
+                      </label>
+                    </div>
+                  );
+                })}
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setModalPassagemViagemId(null)}
-                  className="px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-lg"
+                  className="px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm"
+                  className="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm cursor-pointer"
                 >
                   Confirmar Emissão da Passagem
                 </button>
@@ -895,7 +1150,7 @@ export const FluxoViagens: React.FC = () => {
       {/* MODAL 2: Resumo e Texto de Envio para Aprovação */}
       {modalAprovacaoTexto && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl max-w-2xl w-full p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
+          <div className="bg-white rounded-xl max-w-2xl w-full p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
                 <div className="p-2 bg-amber-100 text-amber-700 rounded-lg">
@@ -910,7 +1165,7 @@ export const FluxoViagens: React.FC = () => {
               </div>
               <button
                 onClick={() => setModalAprovacaoTexto(null)}
-                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg"
+                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -955,7 +1210,7 @@ export const FluxoViagens: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setModalAprovacaoTexto(null)}
-                className="px-4 py-2 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-lg"
+                className="px-4 py-2 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-lg cursor-pointer"
               >
                 Concluir
               </button>
@@ -964,10 +1219,10 @@ export const FluxoViagens: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL 3: Nova Viagem Manual */}
+      {/* MODAL 3: Nova Viagem Manual (com Somente Ida travado + Necessidades Sim/Não + CC) */}
       {modalNovaViagem && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl max-w-xl w-full p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl max-w-2xl w-full p-6 shadow-2xl space-y-4 my-6">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
                 <div className="p-2 bg-slate-100 text-slate-700 rounded-lg">
@@ -975,12 +1230,12 @@ export const FluxoViagens: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="font-bold text-slate-900 text-base">Nova Programação de Viagem</h3>
-                  <p className="text-xs text-slate-500">Inicia na etapa 'Programada'</p>
+                  <p className="text-xs text-slate-500">Inicia na etapa 'Programada' e integra ao Calendário & Indicadores</p>
                 </div>
               </div>
               <button
                 onClick={() => setModalNovaViagem(false)}
-                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg"
+                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -993,32 +1248,71 @@ export const FluxoViagens: React.FC = () => {
                   <span>{erroNovaViagem}</span>
                 </div>
               )}
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Colaborador *</label>
-                <select
-                  value={novaColabId}
-                  onChange={e => {
-                    setNovaColabId(e.target.value);
-                    const c = getColab(e.target.value);
-                    if (c) {
-                      setNovaOrigem(c.origem);
-                      setNovaDestino(c.destino);
-                      setNovaTransporte(c.transporte);
-                      setNovaVolta(new Date(new Date(novaIda).getTime() + c.folga * 86400000).toISOString().split('T')[0]);
-                    }
-                  }}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-xs text-slate-900"
-                  required
-                >
-                  {colaboradores.map(c => (
-                    <option key={c.id} value={c.id}>
-                      {c.nome} (Chapa {c.chapa} - {c.funcao}) - Escala {c.trab}x{c.folga}
-                    </option>
-                  ))}
-                </select>
+
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block font-semibold text-slate-700 mb-1">Colaborador *</label>
+                  <select
+                    value={novaColabId}
+                    onChange={e => {
+                      setNovaColabId(e.target.value);
+                      const c = getColab(e.target.value);
+                      if (c) {
+                        const op = c.operacao || 'UMCA';
+                        setNovaOperacao(op);
+                        setNovaCentroCusto(c.centroCusto || op);
+                        setNovaOrigem(c.origem);
+                        setNovaDestino(c.destino);
+                        setNovaNecessitaAereo(c.transporte.includes('Aéreo'));
+                        setNovaNecessitaRodoviario(c.transporte.includes('Rodoviário'));
+                        setNovaNecessitaTaxi(c.beneficios.toLowerCase().includes('táxi'));
+                        setNovaSolicitante(`Logística ${op}`);
+                        setNovaVolta(
+                          new Date(new Date(novaIda).getTime() + c.folga * 86400000).toISOString().split('T')[0]
+                        );
+                      }
+                    }}
+                    className="w-full bg-slate-50 border border-slate-300 rounded-lg px-2.5 py-2 text-xs text-slate-900"
+                    required
+                  >
+                    {colaboradores.map(c => (
+                      <option key={c.id} value={c.id}>
+                        [{c.operacao || 'UMCA'}] {c.nome} (Chapa {c.chapa})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Operação</label>
+                  <select
+                    value={novaOperacao}
+                    onChange={e => {
+                      const op = e.target.value as Operacao;
+                      setNovaOperacao(op);
+                      setNovaCentroCusto(op);
+                    }}
+                    className="w-full bg-slate-50 border border-slate-300 rounded-lg px-2.5 py-2 font-mono font-bold text-slate-900"
+                  >
+                    {OPERACOES.map(op => (
+                      <option key={op} value={op}>{op}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Centro de Custo</label>
+                  <input
+                    type="text"
+                    value={novaCentroCusto}
+                    onChange={e => setNovaCentroCusto(e.target.value.toUpperCase())}
+                    className="w-full bg-slate-50 border border-slate-300 rounded-lg px-2.5 py-2 font-mono font-bold text-slate-900"
+                    required
+                  />
+                </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Data de Ida *</label>
                   <input
@@ -1030,18 +1324,67 @@ export const FluxoViagens: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Data de Volta *</label>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Data de Volta {novaSomenteIda ? '(N.A)' : '*'}
+                  </label>
                   <input
                     type="date"
-                    value={novaVolta}
+                    value={novaSomenteIda ? '' : novaVolta}
                     onChange={e => setNovaVolta(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-xs text-slate-900"
-                    required
+                    disabled={novaSomenteIda}
+                    className={`w-full border border-slate-300 rounded-lg px-3 py-1.5 text-xs ${
+                      novaSomenteIda ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-slate-50 text-slate-900'
+                    }`}
+                    required={!novaSomenteIda}
                   />
+                </div>
+                {/* Campo Travado: Somente Ida */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="font-semibold text-slate-700 flex items-center gap-1">
+                      {isAdmin && novaSomenteIdaDestravado ? (
+                        <Unlock className="w-3 h-3 text-emerald-600" />
+                      ) : (
+                        <Lock className="w-3 h-3 text-amber-600" />
+                      )}
+                      <span>Somente Ida</span>
+                    </label>
+                    {isAdmin ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (novaSomenteIdaDestravado) {
+                            setNovaSomenteIda(false);
+                            setNovaSomenteIdaDestravado(false);
+                          } else {
+                            setNovaSomenteIdaDestravado(true);
+                          }
+                        }}
+                        className="text-[10px] text-blue-600 font-bold underline cursor-pointer"
+                      >
+                        {novaSomenteIdaDestravado ? 'Travar' : 'Destravar'}
+                      </button>
+                    ) : (
+                      <span className="text-[10px] text-amber-700 font-semibold">Travado</span>
+                    )}
+                  </div>
+                  <select
+                    value={novaSomenteIda ? 'Sim' : 'Não'}
+                    onChange={e => setNovaSomenteIda(e.target.value === 'Sim')}
+                    disabled={!(isAdmin && novaSomenteIdaDestravado)}
+                    className={`w-full border rounded-lg px-2 py-1.5 font-semibold ${
+                      isAdmin && novaSomenteIdaDestravado
+                        ? 'bg-white border-emerald-400 text-slate-900'
+                        : 'bg-slate-100 border-slate-300 text-slate-500 cursor-not-allowed'
+                    }`}
+                  >
+                    <option value="Não">Não (Travado)</option>
+                    <option value="Sim">Sim (Somente Ida)</option>
+                  </select>
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Origem</label>
                   <input
@@ -1049,6 +1392,7 @@ export const FluxoViagens: React.FC = () => {
                     value={novaOrigem}
                     onChange={e => setNovaOrigem(e.target.value)}
                     className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-xs text-slate-900"
+                    required
                   />
                 </div>
                 <div>
@@ -1058,18 +1402,53 @@ export const FluxoViagens: React.FC = () => {
                     value={novaDestino}
                     onChange={e => setNovaDestino(e.target.value)}
                     className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-xs text-slate-900"
+                    required
                   />
                 </div>
+              </div>
+
+              {/* Necessidades de Transporte (Sim / Não) */}
+              <div className="grid grid-cols-3 gap-2.5 p-3 bg-slate-50 border border-slate-200 rounded-lg">
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Transporte</label>
+                  <label className="block font-semibold text-slate-700 mb-1 flex items-center gap-1">
+                    <Car className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Necessita táxi?</span>
+                  </label>
                   <select
-                    value={novaTransporte}
-                    onChange={e => setNovaTransporte(e.target.value as Viagem['transporte'])}
-                    className="w-full bg-slate-50 border border-slate-300 rounded-lg px-2 py-1.5 text-xs text-slate-900"
+                    value={novaNecessitaTaxi ? 'Sim' : 'Não'}
+                    onChange={e => setNovaNecessitaTaxi(e.target.value === 'Sim')}
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 font-semibold text-slate-900"
                   >
-                    <option value="Aéreo">Aéreo</option>
-                    <option value="Rodoviário">Rodoviário</option>
-                    <option value="Aéreo + Rodoviário">Aéreo + Rodoviário</option>
+                    <option value="Sim">Sim</option>
+                    <option value="Não">Não</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1 flex items-center gap-1">
+                    <Plane className="w-3.5 h-3.5 text-blue-600" />
+                    <span>Necessita aéreo?</span>
+                  </label>
+                  <select
+                    value={novaNecessitaAereo ? 'Sim' : 'Não'}
+                    onChange={e => setNovaNecessitaAereo(e.target.value === 'Sim')}
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 font-semibold text-slate-900"
+                  >
+                    <option value="Sim">Sim</option>
+                    <option value="Não">Não</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1 flex items-center gap-1">
+                    <Bus className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Rodoviário?</span>
+                  </label>
+                  <select
+                    value={novaNecessitaRodoviario ? 'Sim' : 'Não'}
+                    onChange={e => setNovaNecessitaRodoviario(e.target.value === 'Sim')}
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 font-semibold text-slate-900"
+                  >
+                    <option value="Sim">Sim</option>
+                    <option value="Não">Não</option>
                   </select>
                 </div>
               </div>
@@ -1100,7 +1479,26 @@ export const FluxoViagens: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex items-center gap-4 pt-2">
+              {/* Hospedagem & Acesso à Obra */}
+              <div className="flex flex-wrap items-center gap-4 pt-1">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={novaHospedagem}
+                    onChange={e => setNovaHospedagem(e.target.checked)}
+                    className="rounded text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="font-semibold text-slate-700">Reserva de Hospedagem</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={novaAcessoObra}
+                    onChange={e => setNovaAcessoObra(e.target.checked)}
+                    className="rounded text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="font-semibold text-slate-700">Acesso à Obra (QR Code)</span>
+                </label>
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
@@ -1117,15 +1515,41 @@ export const FluxoViagens: React.FC = () => {
                     onChange={e => setNovaFolgaConforme(e.target.checked)}
                     className="rounded text-blue-600 focus:ring-blue-500"
                   />
-                  <span className="font-semibold text-slate-700">Folga Conforme Planejamento</span>
+                  <span className="font-semibold text-slate-700">Folga Conforme</span>
                 </label>
               </div>
+
+              {novaHospedagem && (
+                <div className="grid grid-cols-2 gap-3 p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Tipo Hospedagem</label>
+                    <select
+                      value={novaTipoHosp}
+                      onChange={e => setNovaTipoHosp(e.target.value as TipoHospedagem)}
+                      className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-slate-900"
+                    >
+                      <option value="Hotel">Hotel (exige PDF reserva)</option>
+                      <option value="República">República</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Local Hospedagem</label>
+                    <input
+                      type="text"
+                      value={novaLocalHosp}
+                      onChange={e => setNovaLocalHosp(e.target.value)}
+                      placeholder="Ex: Hotel Ibis Parauapebas"
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-slate-900"
+                    />
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Observações</label>
                 <input
                   type="text"
-                  placeholder="Ex: destino final Oriximiná"
+                  placeholder="Ex: agrupar táxi com equipe do turno A"
                   value={novaObs}
                   onChange={e => setNovaObs(e.target.value)}
                   className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-xs text-slate-900"
@@ -1136,13 +1560,13 @@ export const FluxoViagens: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setModalNovaViagem(false)}
-                  className="px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-lg"
+                  className="px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-lg"
+                  className="px-4 py-2 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-lg cursor-pointer"
                 >
                   Criar Viagem
                 </button>
@@ -1152,15 +1576,15 @@ export const FluxoViagens: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL 4: Editar Viagem (detecta remarcação se alterar data de ida) */}
+      {/* MODAL 4: Editar Viagem */}
       {modalEditarViagem && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl max-w-xl w-full p-6 shadow-2xl space-y-4 my-6">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <h3 className="font-bold text-slate-900 text-base">Editar Viagem</h3>
               <button
                 onClick={() => setModalEditarViagem(null)}
-                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg"
+                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -1173,7 +1597,8 @@ export const FluxoViagens: React.FC = () => {
                   <span>{erroEdicaoViagem}</span>
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-3">
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Data de Ida</label>
                   <input
@@ -1183,23 +1608,118 @@ export const FluxoViagens: React.FC = () => {
                     className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono text-slate-900"
                     required
                   />
-                  <p className="text-[10px] text-amber-600 mt-0.5">
-                    * Alterar data de ida após definida marca Ocorrência como "Remarcada"
-                  </p>
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Data de Volta</label>
                   <input
                     type="date"
-                    value={modalEditarViagem.volta}
+                    value={modalEditarViagem.somenteIda ? '' : modalEditarViagem.volta}
                     onChange={e => setModalEditarViagem({ ...modalEditarViagem, volta: e.target.value })}
-                    className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono text-slate-900"
-                    required
+                    disabled={Boolean(modalEditarViagem.somenteIda)}
+                    className={`w-full border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono ${
+                      modalEditarViagem.somenteIda ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-slate-50 text-slate-900'
+                    }`}
+                    required={!modalEditarViagem.somenteIda}
                   />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="font-semibold text-slate-700 flex items-center gap-1">
+                      {isAdmin && editarSomenteIdaDestravado ? (
+                        <Unlock className="w-3 h-3 text-emerald-600" />
+                      ) : (
+                        <Lock className="w-3 h-3 text-amber-600" />
+                      )}
+                      <span>Somente Ida</span>
+                    </label>
+                    {isAdmin ? (
+                      <button
+                        type="button"
+                        onClick={() => setEditarSomenteIdaDestravado(!editarSomenteIdaDestravado)}
+                        className="text-[10px] font-bold text-blue-600 underline cursor-pointer"
+                      >
+                        {editarSomenteIdaDestravado ? 'Travar' : 'Destravar'}
+                      </button>
+                    ) : (
+                      <span className="text-[10px] text-amber-700 font-semibold">Travado</span>
+                    )}
+                  </div>
+                  <select
+                    value={modalEditarViagem.somenteIda ? 'Sim' : 'Não'}
+                    onChange={e =>
+                      setModalEditarViagem({ ...modalEditarViagem, somenteIda: e.target.value === 'Sim' })
+                    }
+                    disabled={!(isAdmin && editarSomenteIdaDestravado)}
+                    className={`w-full border rounded px-2 py-1.5 font-semibold ${
+                      isAdmin && editarSomenteIdaDestravado
+                        ? 'bg-white border-emerald-400 text-slate-900'
+                        : 'bg-slate-100 border-slate-300 text-slate-500 cursor-not-allowed'
+                    }`}
+                  >
+                    <option value="Não">Não (Travado)</option>
+                    <option value="Sim">Sim (Somente Ida)</option>
+                  </select>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              {/* Necessidades de Transporte (Sim / Não) */}
+              <div className="grid grid-cols-3 gap-2.5 p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Necessita táxi?</label>
+                  <select
+                    value={modalEditarViagem.necessitaTaxi ? 'Sim' : 'Não'}
+                    onChange={e =>
+                      setModalEditarViagem({ ...modalEditarViagem, necessitaTaxi: e.target.value === 'Sim' })
+                    }
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1 text-slate-900"
+                  >
+                    <option value="Sim">Sim</option>
+                    <option value="Não">Não</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Necessita aéreo?</label>
+                  <select
+                    value={modalEditarViagem.necessitaAereo ? 'Sim' : 'Não'}
+                    onChange={e =>
+                      setModalEditarViagem({ ...modalEditarViagem, necessitaAereo: e.target.value === 'Sim' })
+                    }
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1 text-slate-900"
+                  >
+                    <option value="Sim">Sim</option>
+                    <option value="Não">Não</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Rodoviário?</label>
+                  <select
+                    value={modalEditarViagem.necessitaRodoviario ? 'Sim' : 'Não'}
+                    onChange={e =>
+                      setModalEditarViagem({
+                        ...modalEditarViagem,
+                        necessitaRodoviario: e.target.value === 'Sim',
+                      })
+                    }
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1 text-slate-900"
+                  >
+                    <option value="Sim">Sim</option>
+                    <option value="Não">Não</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Centro de Custo</label>
+                  <input
+                    type="text"
+                    value={modalEditarViagem.centroCusto || ''}
+                    onChange={e =>
+                      setModalEditarViagem({ ...modalEditarViagem, centroCusto: e.target.value.toUpperCase() })
+                    }
+                    className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono font-bold text-slate-900"
+                  />
+                </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Voucher / Localizador</label>
                   <input
@@ -1215,7 +1735,12 @@ export const FluxoViagens: React.FC = () => {
                     type="number"
                     step="0.01"
                     value={modalEditarViagem.custoPassagem ?? ''}
-                    onChange={e => setModalEditarViagem({ ...modalEditarViagem, custoPassagem: parseFloat(e.target.value) || null })}
+                    onChange={e =>
+                      setModalEditarViagem({
+                        ...modalEditarViagem,
+                        custoPassagem: parseFloat(e.target.value) || null,
+                      })
+                    }
                     className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono text-slate-900"
                   />
                 </div>
@@ -1226,7 +1751,12 @@ export const FluxoViagens: React.FC = () => {
                   <label className="block font-semibold text-slate-700 mb-1">Ocorrência</label>
                   <select
                     value={modalEditarViagem.ocorrencia}
-                    onChange={e => setModalEditarViagem({ ...modalEditarViagem, ocorrencia: e.target.value as OcorrenciaViagem })}
+                    onChange={e =>
+                      setModalEditarViagem({
+                        ...modalEditarViagem,
+                        ocorrencia: e.target.value as OcorrenciaViagem,
+                      })
+                    }
                     className="w-full bg-slate-50 border border-slate-300 rounded px-2 py-1.5 text-xs text-slate-900"
                   >
                     <option value="Sem alteração">Sem alteração</option>
@@ -1239,14 +1769,16 @@ export const FluxoViagens: React.FC = () => {
                   <label className="block font-semibold text-slate-700 mb-1">Etapa Atual</label>
                   <select
                     value={modalEditarViagem.etapa}
-                    onChange={e => setModalEditarViagem({ ...modalEditarViagem, etapa: e.target.value as EtapaViagem })}
+                    onChange={e =>
+                      setModalEditarViagem({ ...modalEditarViagem, etapa: e.target.value as EtapaViagem })
+                    }
                     className="w-full bg-slate-50 border border-slate-300 rounded px-2 py-1.5 text-xs text-slate-900"
                   >
                     <option value="programada">1. Programada</option>
                     <option value="enviada">2. Enviada para aprovação</option>
                     <option value="aprovada">3. Aprovada</option>
                     <option value="comprada">4. Passagem comprada</option>
-                    <option value="realizada">5. Realizada</option>
+                    <option value="realizada">5. Realizada (exige docs obrigatórios)</option>
                   </select>
                 </div>
               </div>
@@ -1265,13 +1797,13 @@ export const FluxoViagens: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setModalEditarViagem(null)}
-                  className="px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-lg"
+                  className="px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-lg"
+                  className="px-4 py-2 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-lg cursor-pointer"
                 >
                   Salvar Alterações
                 </button>
@@ -1284,19 +1816,19 @@ export const FluxoViagens: React.FC = () => {
       {/* MODAL 5: Cancelar Viagem */}
       {viagemParaCancelar && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl max-w-sm w-full p-5 shadow-2xl space-y-3 animate-in fade-in zoom-in-95">
+          <div className="bg-white rounded-xl max-w-sm w-full p-5 shadow-2xl space-y-3">
             <div className="flex items-center gap-2 text-rose-600">
               <Ban className="w-5 h-5 shrink-0" />
               <h3 className="font-bold text-slate-900 text-sm">Cancelar Viagem</h3>
             </div>
             <p className="text-xs text-slate-600">
-              Deseja cancelar a viagem de <strong>{getColab(viagemParaCancelar.colabId)?.nome || 'colaborador'}</strong>? Ela sairá do fluxo ativo e dos custos nos indicadores.
+              Deseja cancelar a viagem de <strong>{getNomePassageiro(viagemParaCancelar)}</strong>? Ela sairá do fluxo ativo e dos custos nos indicadores.
             </p>
             <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
               <button
                 type="button"
                 onClick={() => setViagemParaCancelar(null)}
-                className="px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 rounded"
+                className="px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 rounded cursor-pointer"
               >
                 Voltar
               </button>
@@ -1306,7 +1838,7 @@ export const FluxoViagens: React.FC = () => {
                   cancelarViagem(viagemParaCancelar.id);
                   setViagemParaCancelar(null);
                 }}
-                className="px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded shadow-xs"
+                className="px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded shadow-xs cursor-pointer"
               >
                 Confirmar Cancelamento
               </button>

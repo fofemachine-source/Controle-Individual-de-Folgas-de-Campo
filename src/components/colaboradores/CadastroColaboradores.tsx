@@ -14,8 +14,10 @@ import {
   MapPin,
   Calendar,
   AlertCircle,
+  Pencil,
+  Check,
 } from 'lucide-react';
-import { Colaborador, TipoTransporte, BeneficiosTipo } from '../../types';
+import { Colaborador, TipoTransporte, BeneficiosTipo, Operacao, OPERACOES } from '../../types';
 import { formatarDataBR } from '../../utils/dateUtils';
 
 const ESCALAS_PRESET = [
@@ -40,8 +42,13 @@ export const CadastroColaboradores: React.FC = () => {
   } = useApp();
 
   const [busca, setBusca] = useState('');
+  const [filtroOperacao, setFiltroOperacao] = useState<'todas' | Operacao>('todas');
   const [filtroEscala, setFiltroEscala] = useState('todas');
   const [filtroFerias, setFiltroFerias] = useState<'todos' | 'ferias' | 'ativos'>('todos');
+
+  // Edição rápida inline do nome
+  const [editandoNomeId, setEditandoNomeId] = useState<string | null>(null);
+  const [nomeInlineTemp, setNomeInlineTemp] = useState('');
 
   // Modais
   const [modalNovo, setModalNovo] = useState(false);
@@ -51,6 +58,8 @@ export const CadastroColaboradores: React.FC = () => {
   // Form states
   const [formChapa, setFormChapa] = useState('');
   const [formNome, setFormNome] = useState('');
+  const [formOperacao, setFormOperacao] = useState<Operacao>('UMCA');
+  const [formCentroCusto, setFormCentroCusto] = useState('UMCA');
   const [formFuncao, setFormFuncao] = useState('Eletricista III');
   const [formTrab, setFormTrab] = useState(60);
   const [formFolga, setFormFolga] = useState(10);
@@ -78,6 +87,8 @@ export const CadastroColaboradores: React.FC = () => {
     const proximaChapa = Math.max(...colaboradores.map(c => c.chapa), 10800) + 1;
     setFormChapa(String(proximaChapa));
     setFormNome('');
+    setFormOperacao('UMCA');
+    setFormCentroCusto('UMCA');
     setFormFuncao('Mecânico III');
     setFormTrab(60);
     setFormFolga(10);
@@ -104,6 +115,8 @@ export const CadastroColaboradores: React.FC = () => {
     adicionarColaborador({
       chapa: Number(formChapa),
       nome: formNome.trim(),
+      operacao: formOperacao,
+      centroCusto: (formCentroCusto || formOperacao).trim().toUpperCase(),
       funcao: formFuncao,
       trab: Number(formTrab),
       folga: Number(formFolga),
@@ -120,6 +133,15 @@ export const CadastroColaboradores: React.FC = () => {
     setModalNovo(false);
   };
 
+  const salvarNomeInline = (id: string) => {
+    const limpo = nomeInlineTemp.trim();
+    if (limpo.length >= 2) {
+      atualizarColaborador(id, { nome: limpo });
+    }
+    setEditandoNomeId(null);
+    setNomeInlineTemp('');
+  };
+
   // Filtragem
   const colaboradoresFiltrados = useMemo(() => {
     return colaboradores.filter(c => {
@@ -127,9 +149,14 @@ export const CadastroColaboradores: React.FC = () => {
         c.nome.toLowerCase().includes(busca.toLowerCase()) ||
         String(c.chapa).includes(busca) ||
         c.funcao.toLowerCase().includes(busca.toLowerCase()) ||
-        c.destino.toLowerCase().includes(busca.toLowerCase());
+        c.destino.toLowerCase().includes(busca.toLowerCase()) ||
+        (c.operacao || '').toLowerCase().includes(busca.toLowerCase());
 
       if (!matchTexto) return false;
+
+      if (filtroOperacao !== 'todas' && (c.operacao || 'UMCA') !== filtroOperacao) {
+        return false;
+      }
 
       if (filtroEscala !== 'todas') {
         const escalaStr = `${c.trab}x${c.folga}`;
@@ -141,7 +168,7 @@ export const CadastroColaboradores: React.FC = () => {
 
       return true;
     });
-  }, [colaboradores, busca, filtroEscala, filtroFerias]);
+  }, [colaboradores, busca, filtroOperacao, filtroEscala, filtroFerias]);
 
   return (
     <div className="space-y-6">
@@ -190,6 +217,21 @@ export const CadastroColaboradores: React.FC = () => {
               onChange={e => setBusca(e.target.value)}
               className="w-full bg-slate-50 border border-slate-300 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
+          </div>
+
+          {/* Filtro Operação */}
+          <div className="flex items-center gap-1.5">
+            <span className="font-semibold text-slate-700">Operação:</span>
+            <select
+              value={filtroOperacao}
+              onChange={e => setFiltroOperacao(e.target.value as 'todas' | Operacao)}
+              className="bg-slate-50 border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs font-mono font-semibold text-slate-900"
+            >
+              <option value="todas">Todas</option>
+              {OPERACOES.map(op => (
+                <option key={op} value={op}>{op}</option>
+              ))}
+            </select>
           </div>
 
           {/* Filtro Escala */}
@@ -252,6 +294,7 @@ export const CadastroColaboradores: React.FC = () => {
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase tracking-wider">
                 <th className="py-3 px-3">Chapa</th>
+                <th className="py-3 px-3">Operação / CC</th>
                 <th className="py-3 px-3">Nome do Colaborador</th>
                 <th className="py-3 px-3">Função</th>
                 <th className="py-3 px-3">Escala (Trab x Folga)</th>
@@ -266,7 +309,7 @@ export const CadastroColaboradores: React.FC = () => {
             <tbody className="divide-y divide-slate-100">
               {colaboradoresFiltrados.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="py-10 text-center text-slate-500">
+                  <td colSpan={11} className="py-10 text-center text-slate-500">
                     Nenhum colaborador encontrado com os filtros atuais.
                   </td>
                 </tr>
@@ -283,9 +326,73 @@ export const CadastroColaboradores: React.FC = () => {
                       {c.chapa}
                     </td>
 
-                    {/* Nome */}
-                    <td className="py-3 px-3">
-                      <div className="font-semibold text-slate-900">{c.nome}</div>
+                    {/* Operação / CC */}
+                    <td className="py-3 px-3 whitespace-nowrap">
+                      <span className="font-mono text-[11px] font-bold px-2 py-0.5 rounded bg-indigo-50 text-indigo-800 border border-indigo-200">
+                        {c.operacao || 'UMCA'}
+                      </span>
+                      {c.centroCusto && c.centroCusto !== c.operacao && (
+                        <div className="text-[10px] text-slate-500 font-mono mt-0.5">CC: {c.centroCusto}</div>
+                      )}
+                    </td>
+
+                    {/* Nome com edição rápida inline */}
+                    <td className="py-3 px-3 min-w-[200px]">
+                      {editandoNomeId === c.id ? (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="text"
+                            value={nomeInlineTemp}
+                            onChange={e => setNomeInlineTemp(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') salvarNomeInline(c.id);
+                              if (e.key === 'Escape') setEditandoNomeId(null);
+                            }}
+                            autoFocus
+                            className="w-full bg-white border border-blue-500 rounded px-2 py-1 text-xs font-semibold text-slate-900"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => salvarNomeInline(c.id)}
+                            className="p-1 text-white bg-emerald-600 hover:bg-emerald-700 rounded cursor-pointer"
+                            title="Salvar nome"
+                          >
+                            <Check className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditandoNomeId(null)}
+                            className="p-1 text-slate-600 bg-slate-200 hover:bg-slate-300 rounded cursor-pointer"
+                            title="Cancelar"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            onClick={() => {
+                              setEditandoNomeId(c.id);
+                              setNomeInlineTemp(c.nome);
+                            }}
+                            className="font-semibold text-slate-900 hover:text-blue-700 cursor-pointer"
+                            title="Clique para corrigir o nome"
+                          >
+                            {c.nome}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditandoNomeId(c.id);
+                              setNomeInlineTemp(c.nome);
+                            }}
+                            className="p-0.5 text-slate-400 hover:text-blue-600 rounded cursor-pointer"
+                            title="Corrigir nome"
+                          >
+                            <Pencil className="w-3 h-3" />
+                          </button>
+                        </div>
+                      )}
                       <div className="text-[11px] text-slate-400 font-mono">ID: {c.id}</div>
                     </td>
 
@@ -410,6 +517,35 @@ export const CadastroColaboradores: React.FC = () => {
                     className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-slate-900"
                     placeholder="Ex: Carlos Eduardo Silveira"
                     required
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Operação *</label>
+                  <select
+                    value={formOperacao}
+                    onChange={e => {
+                      const op = e.target.value as Operacao;
+                      setFormOperacao(op);
+                      setFormCentroCusto(op);
+                    }}
+                    className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 font-mono font-bold text-slate-900"
+                  >
+                    {OPERACOES.map(op => (
+                      <option key={op} value={op}>{op}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Centro de Custo</label>
+                  <input
+                    type="text"
+                    value={formCentroCusto}
+                    onChange={e => setFormCentroCusto(e.target.value.toUpperCase())}
+                    className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 font-mono font-bold text-slate-900"
+                    placeholder="Ex: UMCA"
                   />
                 </div>
               </div>
@@ -619,6 +755,39 @@ export const CadastroColaboradores: React.FC = () => {
                     onChange={e => setModalEditar({ ...modalEditar, nome: e.target.value })}
                     className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-slate-900"
                     required
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Operação</label>
+                  <select
+                    value={modalEditar.operacao || 'UMCA'}
+                    onChange={e => {
+                      const op = e.target.value as Operacao;
+                      setModalEditar({
+                        ...modalEditar,
+                        operacao: op,
+                        centroCusto: modalEditar.centroCusto || op,
+                      });
+                    }}
+                    className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 font-mono font-bold text-slate-900"
+                  >
+                    {OPERACOES.map(op => (
+                      <option key={op} value={op}>{op}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Centro de Custo</label>
+                  <input
+                    type="text"
+                    value={modalEditar.centroCusto || modalEditar.operacao || 'UMCA'}
+                    onChange={e =>
+                      setModalEditar({ ...modalEditar, centroCusto: e.target.value.toUpperCase() })
+                    }
+                    className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 font-mono font-bold text-slate-900"
                   />
                 </div>
               </div>

@@ -39,9 +39,9 @@ export default function App() {
         <footer className="no-print border-t border-slate-200 bg-white py-4 mt-auto">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
             <div>
-              <span className="font-semibold text-slate-700">Controle de Folgas e Viagens – UMCA</span>
+              <span className="font-semibold text-slate-700">Controle de Folgas e Viagens – U&M</span>
               <span className="mx-2">·</span>
-              <span>Logística de Campo & Manutenção</span>
+              <span>Operações UMCA · UMGE · UMBC · UMSS</span>
             </div>
             <div>
               <span>Ambiente operacional com dados fictícios de teste. Conforme LGPD.</span>

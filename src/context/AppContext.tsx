@@ -6,6 +6,9 @@ import {
   CalculoFolga,
   IndicadoresCAN,
   EtapaViagem,
+  UserRole,
+  ChaveAnexo,
+  AnexoDocumento,
 } from '../types';
 import {
   COLABORADORES_INICIAIS,
@@ -18,15 +21,25 @@ import {
   formatarDataBR,
   obterHojeISO,
 } from '../utils/dateUtils';
-import { formatarMoeda } from '../utils/formatters';
+import {
+  avaliarDocumentosViagem,
+  calcularIndicadoresCAN,
+  obterNecessidadesTransporte,
+} from '../utils/viagemUtils';
 
-interface ModalPassagemPayload {
+export interface ModalPassagemPayload {
   custoPassagem: number;
   voucher: string;
   hospedagem: boolean;
   tipoHosp: 'República' | 'Hotel' | 'N.A';
   localHosp: string;
   custoHospedagem: number | null;
+  anexosNovos?: Partial<NonNullable<Viagem['anexos']>>;
+}
+
+export interface AvancarEtapaResult {
+  ok: boolean;
+  erro?: string;
 }
 
 interface AppContextType {
@@ -43,6 +56,13 @@ interface AppContextType {
   setGasWebAppUrl: (url: string) => void;
   gasStatus: { loading: boolean; message: string; lastSync?: string };
 
+  // Controle de Acesso (Administrador)
+  userRole: UserRole;
+  isAdmin: boolean;
+  autenticarAdmin: (senha: string) => boolean;
+  sairAdmin: () => void;
+  alterarSenhaAdmin: (novaSenha: string) => void;
+
   // Cálculos e Indicadores
   calculosFolgas: CalculoFolga[];
   indicadores: IndicadoresCAN;
@@ -54,13 +74,15 @@ interface AppContextType {
   removerColaborador: (id: string) => void;
   alternarFeriasColaborador: (id: string) => void;
 
-  // Ações de Viagem
+  // Ações de Viagem e Anexos
   criarViagem: (v: Omit<Viagem, 'id'>) => string;
-  atualizarViagem: (id: string, v: Partial<Viagem>) => void;
+  atualizarViagem: (id: string, v: Partial<Viagem>) => AvancarEtapaResult;
   removerViagem: (id: string) => void;
-  avancarEtapaViagem: (id: string, payloadPassagem?: ModalPassagemPayload) => boolean;
+  avancarEtapaViagem: (id: string, payloadPassagem?: ModalPassagemPayload) => AvancarEtapaResult;
   retrocederEtapaViagem: (id: string) => void;
   cancelarViagem: (id: string, motivoCancelamento?: string) => void;
+  anexarDocumentoViagem: (id: string, chave: ChaveAnexo, anexo: AnexoDocumento) => void;
+  removerDocumentoViagem: (id: string, chave: ChaveAnexo) => void;
 
   // Automações
   gerarProgramacaoProximos30Dias: () => number;
@@ -81,16 +103,28 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const STORAGE_KEYS = {
-  COLABS: 'umca_colaboradores_v2',
-  VIAGENS: 'umca_viagens_v2',
-  AVISOS: 'umca_avisos_v2',
-  APROVADOR: 'umca_aprovador_v2',
-  GAS_URL: 'umca_gas_url_v2',
+  COLABS: 'umca_colaboradores_v3',
+  VIAGENS: 'umca_viagens_v3',
+  AVISOS: 'umca_avisos_v3',
+  APROVADOR: 'umca_aprovador_v3',
+  GAS_URL: 'umca_gas_url_v3',
+  ROLE: 'umca_user_role_v3',
+  ADMIN_PASS: 'umca_admin_pass_v3',
 };
+
+const SENHA_ADMIN_PADRAO = 'admin123';
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [hoje, setHoje] = useState<string>(() => obterHojeISO());
-  const [activeTab, setActiveTab] = useState<string>('folgas');
+  const [activeTab, setActiveTab] = useState<string>('indicadores');
+  const [userRole, setUserRole] = useState<UserRole>(() => {
+    const saved = localStorage.getItem(STORAGE_KEYS.ROLE);
+    return saved === 'admin' ? 'admin' : 'usuario';
+  });
+  const [adminPass, setAdminPass] = useState<string>(() => {
+    return localStorage.getItem(STORAGE_KEYS.ADMIN_PASS) || SENHA_ADMIN_PADRAO;
+  });
+
   const [aprovadorNome, setAprovadorNome] = useState<string>(() => {
     return localStorage.getItem(STORAGE_KEYS.APROVADOR) || 'Roberto Menezes (Gerência de Manutenção / RH)';
   });
@@ -106,7 +140,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const saved = localStorage.getItem(STORAGE_KEYS.COLABS);
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed: Colaborador[] = JSON.parse(saved);
+        return parsed.map(c => ({
+          ...c,
+          operacao: c.operacao || 'UMCA',
+          centroCusto: c.centroCusto || c.operacao || 'UMCA',
+        }));
       } catch (e) {
         console.error(e);
       }
@@ -138,17 +177,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return AVISOS_INICIAIS;
   });
 
-  // Salvar no LocalStorage
+  // Persistir no LocalStorage
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.COLABS, JSON.stringify(colaboradores));
+    try {
+      localStorage.setItem(STORAGE_KEYS.COLABS, JSON.stringify(colaboradores));
+    } catch (e) {
+      console.error('Erro ao salvar colaboradores:', e);
+    }
   }, [colaboradores]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.VIAGENS, JSON.stringify(viagens));
+    try {
+      localStorage.setItem(STORAGE_KEYS.VIAGENS, JSON.stringify(viagens));
+    } catch (e) {
+      console.error('Erro ao salvar viagens (verifique tamanho dos anexos):', e);
+    }
   }, [viagens]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.AVISOS, JSON.stringify(avisos));
+    try {
+      localStorage.setItem(STORAGE_KEYS.AVISOS, JSON.stringify(avisos));
+    } catch (e) {
+      console.error('Erro ao salvar avisos:', e);
+    }
   }, [avisos]);
 
   useEffect(() => {
@@ -159,33 +210,64 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem(STORAGE_KEYS.GAS_URL, gasWebAppUrl);
   }, [gasWebAppUrl]);
 
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.ROLE, userRole);
+  }, [userRole]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.ADMIN_PASS, adminPass);
+  }, [adminPass]);
+
+  const isAdmin = userRole === 'admin';
+
+  const autenticarAdmin = (senha: string): boolean => {
+    if (senha.trim() === adminPass) {
+      setUserRole('admin');
+      return true;
+    }
+    return false;
+  };
+
+  const sairAdmin = () => {
+    setUserRole('usuario');
+  };
+
+  const alterarSenhaAdmin = (novaSenha: string) => {
+    if (novaSenha.trim().length >= 4) {
+      setAdminPass(novaSenha.trim());
+    }
+  };
+
   // Função auxiliar para obter primeiro nome
   const primeiroNome = (nome: string) => {
     return (nome || '').trim().split(' ')[0] || 'Colaborador';
   };
 
   // Helper para adicionar aviso com proteção de chave duplicada
-  const emitirAviso = useCallback((
-    key: string,
-    colabId: string,
-    tipo: Aviso['tipo'],
-    texto: string,
-    avisosAtuais: Aviso[]
-  ): Aviso[] => {
-    if (avisosAtuais.some(a => a.key === key)) {
-      return avisosAtuais;
-    }
-    const novoAviso: Aviso = {
-      id: `aviso-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      key,
-      colabId,
-      tipo,
-      texto,
-      criado: hoje,
-      enviado: false,
-    };
-    return [novoAviso, ...avisosAtuais];
-  }, [hoje]);
+  const emitirAviso = useCallback(
+    (
+      key: string,
+      colabId: string,
+      tipo: Aviso['tipo'],
+      texto: string,
+      avisosAtuais: Aviso[]
+    ): Aviso[] => {
+      if (avisosAtuais.some(a => a.key === key)) {
+        return avisosAtuais;
+      }
+      const novoAviso: Aviso = {
+        id: `aviso-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+        key,
+        colabId,
+        tipo,
+        texto,
+        criado: hoje,
+        enviado: false,
+      };
+      return [novoAviso, ...avisosAtuais];
+    },
+    [hoje]
+  );
 
   // Cálculo das folgas individuais com base na escala de cada colaborador
   const calculosFolgas = useMemo<CalculoFolga[]>(() => {
@@ -196,7 +278,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const diasDecorridoCiclo = Math.max(0, diffEmDias(hoje, c.ultimaFolga));
       const percentualCiclo = Math.min(100, Math.round((diasDecorridoCiclo / diasTotalCiclo) * 100));
 
-      // Busca viagem ativa para esse colaborador
       const viagemAtiva = viagens.find(
         v => v.colabId === c.id && v.etapa !== 'realizada' && v.ocorrencia !== 'Cancelada'
       );
@@ -235,108 +316,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   }, [colaboradores, viagens, hoje]);
 
-  // Indicadores CAN
+  // Indicadores CAN (com consolidação por Centro de Custo)
   const indicadores = useMemo<IndicadoresCAN>(() => {
-    let totalRealizadas = 0;
-    let dentroDoPrazo = 0;
-    let foraDoPrazo = 0;
-    let remarcacoes = 0;
-    let cancelamentos = 0;
-    let custoPassagens = 0;
-    let custoHospedagem = 0;
-    let utilizacaoRepublicas = 0;
-    let utilizacaoHoteis = 0;
-    let conformidadeSim = 0;
-    let conformidadeNao = 0;
-    let realizadasPrioritarias = 0;
-
-    const etapasContagem: Record<EtapaViagem, number> = {
-      programada: 0,
-      enviada: 0,
-      aprovada: 0,
-      comprada: 0,
-      realizada: 0,
-    };
-
-    viagens.forEach(v => {
-      // Ocorrências
-      if (v.ocorrencia === 'Remarcada') remarcacoes++;
-      if (v.ocorrencia === 'Cancelada') {
-        cancelamentos++;
-        return; // Viagens canceladas não entram no fluxo ativo nem nos custos
-      }
-
-      etapasContagem[v.etapa] = (etapasContagem[v.etapa] || 0) + 1;
-
-      // Antecedência da solicitação
-      const antecedencia = diffEmDias(v.ida, v.dataSolicitacao);
-      if (antecedencia >= 20) {
-        dentroDoPrazo++;
-      } else {
-        foraDoPrazo++;
-      }
-
-      // Custos
-      if (v.custoPassagem && v.custoPassagem > 0) {
-        custoPassagens += Number(v.custoPassagem);
-      }
-      if (v.custoHospedagem && v.custoHospedagem > 0) {
-        custoHospedagem += Number(v.custoHospedagem);
-      }
-
-      // Hospedagem
-      if (v.hospedagem) {
-        if (v.tipoHosp === 'República') utilizacaoRepublicas++;
-        if (v.tipoHosp === 'Hotel') utilizacaoHoteis++;
-      }
-
-      // Conformidade com planejamento
-      if (v.folgaConforme) {
-        conformidadeSim++;
-      } else {
-        conformidadeNao++;
-      }
-
-      // Status realizada
-      if (v.etapa === 'realizada') {
-        totalRealizadas++;
-        if (v.dataPrioritaria) {
-          realizadasPrioritarias++;
-        }
-      }
-    });
-
-    const totalHospedagens = utilizacaoRepublicas + utilizacaoHoteis;
-    const taxaRepublicas = totalHospedagens > 0 ? Math.round((utilizacaoRepublicas / totalHospedagens) * 100) : 0;
-    const taxaHoteis = totalHospedagens > 0 ? Math.round((utilizacaoHoteis / totalHospedagens) * 100) : 0;
-
-    const totalConformidade = conformidadeSim + conformidadeNao;
-    const conformidadePlanejamento = totalConformidade > 0
-      ? Math.round((conformidadeSim / totalConformidade) * 100)
-      : 100;
-
-    const percentualDatasPrioritarias = totalRealizadas > 0
-      ? Math.round((realizadasPrioritarias / totalRealizadas) * 100)
-      : 0;
-
-    return {
-      totalRealizadas,
-      dentroDoPrazo,
-      foraDoPrazo,
-      remarcacoes,
-      cancelamentos,
-      custoPassagens,
-      custoHospedagem,
-      custoTotal: custoPassagens + custoHospedagem,
-      utilizacaoRepublicas,
-      utilizacaoHoteis,
-      taxaRepublicas,
-      taxaHoteis,
-      conformidadePlanejamento,
-      percentualDatasPrioritarias,
-      totalSolicitacoesAtivas: dentroDoPrazo + foraDoPrazo,
-      etapasContagem,
-    };
+    return calcularIndicadoresCAN(viagens);
   }, [viagens]);
 
   const avisosNaoEnviadosCount = useMemo(() => {
@@ -347,6 +329,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const adicionarColaborador = (c: Omit<Colaborador, 'id'>) => {
     const novo: Colaborador = {
       ...c,
+      operacao: c.operacao || 'UMCA',
+      centroCusto: c.centroCusto || c.operacao || 'UMCA',
       id: `colab-${Date.now()}`,
     };
     setColaboradores(prev => [...prev, novo]);
@@ -369,40 +353,73 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Ações de Viagem
   const criarViagem = (v: Omit<Viagem, 'id'>): string => {
     const id = `viag-${Date.now()}`;
-    const nova: Viagem = { ...v, id };
+    const colab = colaboradores.find(c => c.id === v.colabId);
+    const nova: Viagem = {
+      ...v,
+      id,
+      operacao: v.operacao || colab?.operacao || 'UMCA',
+      centroCusto: (v.centroCusto || v.operacao || colab?.centroCusto || colab?.operacao || 'UMCA').trim().toUpperCase(),
+      somenteIda: isAdmin ? Boolean(v.somenteIda) : false,
+      anexos: v.anexos || {},
+    };
     setViagens(prev => [nova, ...prev]);
     return id;
   };
 
-  const atualizarViagem = (id: string, updates: Partial<Viagem>) => {
-    setViagens(prev => {
-      const atual = prev.find(v => v.id === id);
-      if (!atual) return prev;
+  const atualizarViagem = (id: string, updates: Partial<Viagem>): AvancarEtapaResult => {
+    const atual = viagens.find(v => v.id === id);
+    if (!atual) return { ok: false, erro: 'Viagem não encontrada.' };
 
-      let novaOcorrencia = updates.ocorrencia ?? atual.ocorrencia;
+    // Impede alteração indevida do campo Somente Ida por não-administradores
+    const safeUpdates: Partial<Viagem> = { ...updates };
+    if (!isAdmin && 'somenteIda' in safeUpdates && safeUpdates.somenteIda !== atual.somenteIda) {
+      safeUpdates.somenteIda = Boolean(atual.somenteIda);
+    }
+
+    const candidata: Viagem = {
+      ...atual,
+      ...safeUpdates,
+    };
+
+    // Bloqueia conclusão para 'realizada' se documentos obrigatórios não estiverem anexados
+    if (candidata.etapa === 'realizada' && candidata.ocorrencia !== 'Cancelada') {
+      const avaliacao = avaliarDocumentosViagem(candidata);
+      if (!avaliacao.todosObrigatoriosAnexados) {
+        const faltantes = avaliacao.pendentes.map(d => d.label).join(', ');
+        return {
+          ok: false,
+          erro: `O processo permanece Em Andamento até anexar todos os documentos obrigatórios: ${faltantes}.`,
+        };
+      }
+    }
+
+    setViagens(prev => {
+      const curr = prev.find(v => v.id === id);
+      if (!curr) return prev;
+
+      let novaOcorrencia = safeUpdates.ocorrencia ?? curr.ocorrencia;
       let gerarAvisoRemarcacao = false;
 
-      // Se a data de ida for alterada depois de definida, marcar Remarcada
-      if (updates.ida && updates.ida !== atual.ida && atual.etapa !== 'programada') {
+      if (safeUpdates.ida && safeUpdates.ida !== curr.ida && curr.etapa !== 'programada') {
         novaOcorrencia = 'Remarcada';
         gerarAvisoRemarcacao = true;
       }
 
       const viagemAtualizada: Viagem = {
-        ...atual,
-        ...updates,
+        ...curr,
+        ...safeUpdates,
         ocorrencia: novaOcorrencia,
       };
 
       if (gerarAvisoRemarcacao) {
-        const colab = colaboradores.find(c => c.id === atual.colabId);
+        const colab = colaboradores.find(c => c.id === curr.colabId);
         if (colab) {
           const texto = `Olá, ${primeiroNome(colab.nome)}! Atenção: sua viagem foi remarcada.
 Nova data de ida: ${formatarDataBR(viagemAtualizada.ida)}
-Data de retorno: ${formatarDataBR(viagemAtualizada.volta)}
+Data de retorno: ${viagemAtualizada.somenteIda ? 'Somente Ida' : formatarDataBR(viagemAtualizada.volta)}
 Trecho: ${viagemAtualizada.origem} → ${viagemAtualizada.destino} (${viagemAtualizada.transporte})
 ${viagemAtualizada.voucher ? `Voucher/Localizador: ${viagemAtualizada.voucher}` : ''}
-Qualquer dúvida contate a Logística UMCA.`;
+Qualquer dúvida contate a Logística.`;
 
           setAvisos(prevAvisos =>
             emitirAviso(`remarc-${id}-${viagemAtualizada.ida}`, colab.id, 'Remarcação', texto, prevAvisos)
@@ -412,6 +429,8 @@ Qualquer dúvida contate a Logística UMCA.`;
 
       return prev.map(v => (v.id === id ? viagemAtualizada : v));
     });
+
+    return { ok: true };
   };
 
   const removerViagem = (id: string) => {
@@ -425,22 +444,54 @@ Qualquer dúvida contate a Logística UMCA.`;
     });
   };
 
-  // Automação: Avançar etapa (OK)
-  const avancarEtapaViagem = (id: string, payloadPassagem?: ModalPassagemPayload): boolean => {
+  const anexarDocumentoViagem = (id: string, chave: ChaveAnexo, anexo: AnexoDocumento) => {
+    setViagens(prev =>
+      prev.map(v =>
+        v.id === id
+          ? {
+              ...v,
+              anexos: {
+                ...(v.anexos || {}),
+                [chave]: anexo,
+              },
+            }
+          : v
+      )
+    );
+  };
+
+  const removerDocumentoViagem = (id: string, chave: ChaveAnexo) => {
+    setViagens(prev =>
+      prev.map(v => {
+        if (v.id !== id) return v;
+        const novosAnexos = { ...(v.anexos || {}) };
+        delete novosAnexos[chave];
+        return {
+          ...v,
+          anexos: novosAnexos,
+        };
+      })
+    );
+  };
+
+  // Automação: Avançar etapa (OK) com trava de documentos obrigatórios
+  const avancarEtapaViagem = (
+    id: string,
+    payloadPassagem?: ModalPassagemPayload
+  ): AvancarEtapaResult => {
     const viagem = viagens.find(v => v.id === id);
-    if (!viagem) return false;
+    if (!viagem) return { ok: false, erro: 'Viagem não encontrada.' };
     const colab = colaboradores.find(c => c.id === viagem.colabId);
 
     const ordemEtapas: EtapaViagem[] = ['programada', 'enviada', 'aprovada', 'comprada', 'realizada'];
     const indexAtual = ordemEtapas.indexOf(viagem.etapa);
-    if (indexAtual >= ordemEtapas.length - 1) return false;
+    if (indexAtual >= ordemEtapas.length - 1) return { ok: false, erro: 'Viagem já concluída.' };
 
     const proximaEtapa = ordemEtapas[indexAtual + 1];
 
     if (proximaEtapa === 'comprada') {
       if (!payloadPassagem) {
-        // Exige preenchimento dos custos e voucher
-        return false;
+        return { ok: false, erro: 'Preencha os custos e o voucher para avançar.' };
       }
       const viagemComprada: Viagem = {
         ...viagem,
@@ -451,37 +502,47 @@ Qualquer dúvida contate a Logística UMCA.`;
         tipoHosp: payloadPassagem.tipoHosp,
         localHosp: payloadPassagem.localHosp,
         custoHospedagem: payloadPassagem.custoHospedagem,
+        anexos: {
+          ...(viagem.anexos || {}),
+          ...(payloadPassagem.anexosNovos || {}),
+        },
       };
 
       setViagens(prev => prev.map(v => (v.id === id ? viagemComprada : v)));
 
-      // Gerar aviso automático de Voucher
       if (colab) {
         const textoVoucher = `Olá, ${primeiroNome(colab.nome)}! Sua passagem para a folga foi emitida.
-🛫 Ida: ${formatarDataBR(viagemComprada.ida)} | Retorno: ${formatarDataBR(viagemComprada.volta)}
+🛫 Ida: ${formatarDataBR(viagemComprada.ida)} | Retorno: ${viagemComprada.somenteIda ? 'Somente Ida' : formatarDataBR(viagemComprada.volta)}
 📍 Trecho: ${viagemComprada.origem} → ${viagemComprada.destino} (${viagemComprada.transporte})
 🎫 Voucher/Localizador: ${viagemComprada.voucher}
 ${viagemComprada.hospedagem ? `🏨 Hospedagem: ${viagemComprada.localHosp || viagemComprada.tipoHosp}` : '🏠 Hospedagem: Residência própria'}
-Bom descanso! Equipe Logística UMCA.`;
+Bom descanso! Equipe Logística.`;
 
         setAvisos(prevAvisos =>
           emitirAviso(`voucher-${id}`, colab.id, 'Voucher', textoVoucher, prevAvisos)
         );
       }
-      return true;
+      return { ok: true };
     }
 
     if (proximaEtapa === 'realizada') {
-      // 1. Marca viagem como realizada
+      // REGRA OBRIGATÓRIA: O processo permanece em andamento até que todos os documentos obrigatórios estejam anexados
+      const avaliacao = avaliarDocumentosViagem(viagem);
+      if (!avaliacao.todosObrigatoriosAnexados) {
+        const faltantes = avaliacao.pendentes.map(d => d.label).join(', ');
+        return {
+          ok: false,
+          erro: `Não é possível concluir a viagem. Documentos obrigatórios pendentes: ${faltantes}. Anexe-os na janela "Etapa Atual".`,
+        };
+      }
+
       setViagens(prev => prev.map(v => (v.id === id ? { ...v, etapa: 'realizada' } : v)));
 
-      // 2. Atualiza última folga do colaborador com a data de ida e recalcula
       if (colab) {
         setColaboradores(prev =>
           prev.map(c => (c.id === colab.id ? { ...c, ultimaFolga: viagem.ida } : c))
         );
 
-        // 3. Gera aviso de próxima folga
         const proximaFolgaPrevista = somarDias(viagem.ida, colab.trab);
         const textoProx = `Olá, ${primeiroNome(colab.nome)}! Folga concluída com sucesso.
 Sua próxima folga de campo está prevista para ${formatarDataBR(proximaFolgaPrevista)} (escala ${colab.trab}x${colab.folga}).
@@ -491,12 +552,11 @@ Avisaremos com antecedência assim que a nova programação for gerada. Bom trab
           emitirAviso(`prox-${id}`, colab.id, 'Próxima folga', textoProx, prevAvisos)
         );
       }
-      return true;
+      return { ok: true };
     }
 
-    // Outras etapas (programada -> enviada -> aprovada)
     setViagens(prev => prev.map(v => (v.id === id ? { ...v, etapa: proximaEtapa } : v)));
-    return true;
+    return { ok: true };
   };
 
   const retrocederEtapaViagem = (id: string) => {
@@ -517,7 +577,6 @@ Avisaremos com antecedência assim que a nova programação for gerada. Bom trab
     colaboradores.forEach(c => {
       if (c.ferias || !c.ultimaFolga) return;
 
-      // Verifica se já tem viagem ativa
       const temViagemAberta = viagens.some(
         v => v.colabId === c.id && v.etapa !== 'realizada' && v.ocorrencia !== 'Cancelada'
       );
@@ -526,35 +585,43 @@ Avisaremos com antecedência assim que a nova programação for gerada. Bom trab
       const proximaData = somarDias(c.ultimaFolga, c.trab);
       const diasAteFolga = diffEmDias(proximaData, hoje);
 
-      // Próximos 30 dias (ou vencida)
       if (diasAteFolga <= 30) {
         const ida = diasAteFolga < 0 ? hoje : proximaData;
         const volta = somarDias(ida, c.folga);
+        const op = c.operacao || 'UMCA';
 
         const novaViagem: Viagem = {
           id: `viag-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
           colabId: c.id,
+          operacao: op,
           etapa: 'programada',
           motivo: 'Folga de campo',
           dataSolicitacao: hoje,
           ida,
           volta,
+          somenteIda: false,
           origem: c.origem,
           destino: c.destino,
           transporte: c.transporte,
-          solicitante: 'Logística UMCA',
+          necessitaTaxi: c.beneficios.toLowerCase().includes('táxi'),
+          necessitaAereo: c.transporte.includes('Aéreo'),
+          necessitaRodoviario: c.transporte.includes('Rodoviário'),
+          solicitante: `Logística ${op}`,
           custoPassagem: null,
           voucher: '',
           hospedagem: c.transporte.includes('Aéreo'),
           tipoHosp: c.transporte.includes('Aéreo') ? 'República' : 'N.A',
-          localHosp: c.transporte.includes('Aéreo') ? 'República UMCA' : 'N.A',
+          localHosp: c.transporte.includes('Aéreo') ? `República ${op}` : 'N.A',
           custoHospedagem: null,
           ocorrencia: 'Sem alteração',
           dataPrioritaria: false,
           folgaConforme: true,
-          obs: `Programação gerada automaticamente para ciclo ${c.trab}x${c.folga}.`,
+          obs: `Programação gerada automaticamente para ciclo ${c.trab}x${c.folga} (${op}).`,
           tipoColaborador: c.tipo || 'U&M',
-          centroCusto: 'UMCA',
+          centroCusto: c.centroCusto || op,
+          acessoObra: false,
+          qrCode: false,
+          anexos: {},
         };
 
         novasViagens.push(novaViagem);
@@ -574,21 +641,20 @@ Avisaremos com antecedência assim que a nova programação for gerada. Bom trab
     const viagensSelecionadas = viagens.filter(v => ids.includes(v.id));
     if (viagensSelecionadas.length === 0) return '';
 
-    // Muda etapa para "enviada"
     setViagens(prev =>
       prev.map(v => (ids.includes(v.id) && v.etapa === 'programada' ? { ...v, etapa: 'enviada' } : v))
     );
 
-    // Gera texto estruturado para envio ao aprovador
     const linhas = viagensSelecionadas.map((v, i) => {
       const colab = colaboradores.find(c => c.id === v.colabId);
       const chapa = colab?.chapa || '—';
-      const nome = colab?.nome || '—';
+      const nome = v.passageiroNomeAvulso || colab?.nome || '—';
       const escala = colab ? `${colab.trab}x${colab.folga}` : '—';
-      return `${i + 1}. [Chapa ${chapa}] ${nome} | Escala: ${escala} | Ida: ${formatarDataBR(v.ida)} | Volta: ${formatarDataBR(v.volta)} | Trecho: ${v.origem} → ${v.destino} | Transporte: ${v.transporte}`;
+      const cc = v.centroCusto || v.operacao || 'UMCA';
+      return `${i + 1}. [${cc}] [Chapa ${chapa}] ${nome} | Escala: ${escala} | Ida: ${formatarDataBR(v.ida)} | Volta: ${v.somenteIda ? 'Somente Ida' : formatarDataBR(v.volta)} | Trecho: ${v.origem} → ${v.destino} | Transporte: ${v.transporte}`;
     });
 
-    const textoFormatado = `*SOLICITAÇÃO DE APROVAÇÃO DE VIAGENS / FOLGAS – UMCA*
+    const textoFormatado = `*SOLICITAÇÃO DE APROVAÇÃO DE VIAGENS / FOLGAS – U&M*
 Para: ${aprovadorNome}
 Data de envio: ${formatarDataBR(hoje)}
 Total de colaboradores programados: ${viagensSelecionadas.length}
@@ -597,18 +663,17 @@ Total de colaboradores programados: ${viagensSelecionadas.length}
 ${linhas.join('\n')}
 
 Solicitamos a conferência e aprovação das datas de ida e volta para liberação da emissão de passagens.
-_Logística de Manutenção – UMCA_`;
+_Logística de Manutenção – U&M_`;
 
     return textoFormatado;
   };
 
-  // Rotina diária de lembretes e conclusão automática (conforme Apps Script)
+  // Rotina diária de lembretes e conclusão automática (respeitando trava de documentos obrigatórios)
   const executarRotinaDiaria = (): { log: string[]; avisosCriados: number } => {
     const log: string[] = [];
     let novosAvisos = [...avisos];
     let contadorAvisos = 0;
 
-    // 1. Lembretes automáticos 3 dias antes da viagem com passagem comprada
     viagens.forEach(v => {
       if (v.etapa === 'comprada' && v.ocorrencia !== 'Cancelada' && v.ida) {
         const dias = diffEmDias(v.ida, hoje);
@@ -630,12 +695,18 @@ _Logística de Manutenção – UMCA_`;
       }
     });
 
-    // 2. Viagem comprada onde a volta já passou -> avança automaticamente para "realizada"
     setViagens(prev =>
       prev.map(v => {
         if (v.etapa === 'comprada' && v.ocorrencia !== 'Cancelada' && v.volta) {
           if (diffEmDias(v.volta, hoje) < 0) {
+            const avaliacao = avaliarDocumentosViagem(v);
             const colab = colaboradores.find(c => c.id === v.colabId);
+            if (!avaliacao.todosObrigatoriosAnexados) {
+              log.push(
+                `Mantida em andamento (${colab?.nome || v.id}): faltam documentos obrigatórios (${avaliacao.pendentes.map(p => p.label).join(', ')})`
+              );
+              return v;
+            }
             if (colab) {
               setColaboradores(prevColabs =>
                 prevColabs.map(c => (c.id === colab.id ? { ...c, ultimaFolga: v.ida } : c))
@@ -685,14 +756,17 @@ _Logística de Manutenção – UMCA_`;
   const exportarCSV = (tipo: 'colaboradores' | 'viagens' | 'avisos') => {
     let cabecalho = '';
     let linhas: string[] = [];
-    let nomeArquivo = `umca_${tipo}_${hoje}.csv`;
+    const nomeArquivo = `um_${tipo}_${hoje}.csv`;
 
     if (tipo === 'colaboradores') {
-      cabecalho = 'Chapa,Nome,Função,Dias Trabalho,Dias Folga,Escala,Transporte,Origem,Destino,Benefícios,Telefone,Última Folga,Férias';
+      cabecalho =
+        'Chapa,Nome,Operação,Centro de Custo,Função,Dias Trabalho,Dias Folga,Escala,Transporte,Origem,Destino,Benefícios,Telefone,Última Folga,Férias';
       linhas = colaboradores.map(c =>
         [
           c.chapa,
           `"${c.nome}"`,
+          `"${c.operacao || 'UMCA'}"`,
+          `"${c.centroCusto || c.operacao || 'UMCA'}"`,
           `"${c.funcao}"`,
           c.trab,
           c.folga,
@@ -707,22 +781,33 @@ _Logística de Manutenção – UMCA_`;
         ].join(',')
       );
     } else if (tipo === 'viagens') {
-      cabecalho = 'ID,Colaborador,Etapa,Motivo,Data Solicitação,Data Ida,Data Volta,Origem,Destino,Transporte,Solicitante,Custo Passagem,Voucher,Hospedagem,Tipo Hosp.,Local Hosp.,Custo Hospedagem,Ocorrência,Data Prioritária,Folga Conforme,Antecedência (dias),Classificação Prazo';
+      cabecalho =
+        'ID,Colaborador,Operação,Centro de Custo,Etapa,Status Documentos,Motivo,Data Solicitação,Data Ida,Data Volta,Somente Ida,Origem,Destino,Transporte,Necessita Táxi,Necessita Aéreo,Necessita Rodoviário,Acesso Obra,Solicitante,Custo Passagem,Voucher,Hospedagem,Tipo Hosp.,Local Hosp.,Custo Hospedagem,Ocorrência,Data Prioritária,Folga Conforme,Antecedência (dias),Classificação Prazo';
       linhas = viagens.map(v => {
         const c = colaboradores.find(col => col.id === v.colabId);
         const antecedencia = diffEmDias(v.ida, v.dataSolicitacao);
         const prazo = antecedencia >= 20 ? 'Dentro do prazo' : 'Fora do prazo';
+        const { necessitaTaxi, necessitaAereo, necessitaRodoviario } = obterNecessidadesTransporte(v);
+        const avaliacao = avaliarDocumentosViagem(v);
         return [
           v.id,
-          `"${c?.nome || v.colabId}"`,
+          `"${v.passageiroNomeAvulso || c?.nome || v.colabId}"`,
+          `"${v.operacao || c?.operacao || 'UMCA'}"`,
+          `"${v.centroCusto || v.operacao || 'UMCA'}"`,
           v.etapa,
+          `"${avaliacao.statusProcessoTexto}"`,
           `"${v.motivo}"`,
           formatarDataBR(v.dataSolicitacao),
           formatarDataBR(v.ida),
-          formatarDataBR(v.volta),
+          v.somenteIda ? 'Somente Ida' : formatarDataBR(v.volta),
+          v.somenteIda ? 'Sim' : 'Não',
           `"${v.origem}"`,
           `"${v.destino}"`,
           `"${v.transporte}"`,
+          necessitaTaxi ? 'Sim' : 'Não',
+          necessitaAereo ? 'Sim' : 'Não',
+          necessitaRodoviario ? 'Sim' : 'Não',
+          v.acessoObra ? 'Sim' : 'Não',
           `"${v.solicitante}"`,
           v.custoPassagem ? v.custoPassagem.toFixed(2) : '0.00',
           `"${v.voucher}"`,
@@ -829,6 +914,11 @@ _Logística de Manutenção – UMCA_`;
         gasWebAppUrl,
         setGasWebAppUrl,
         gasStatus,
+        userRole,
+        isAdmin,
+        autenticarAdmin,
+        sairAdmin,
+        alterarSenhaAdmin,
         calculosFolgas,
         indicadores,
         avisosNaoEnviadosCount,
@@ -842,6 +932,8 @@ _Logística de Manutenção – UMCA_`;
         avancarEtapaViagem,
         retrocederEtapaViagem,
         cancelarViagem,
+        anexarDocumentoViagem,
+        removerDocumentoViagem,
         gerarProgramacaoProximos30Dias,
         enviarLoteAprovacao,
         executarRotinaDiaria,
