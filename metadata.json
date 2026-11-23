@@ -1,0 +1,8 @@
+{
+  "name": "Controle de Folgas e Viagens – UMCA",
+  "description": "Sistema integrado de logística de folgas de campo, viagens, aprovações, vouchers e avisos WhatsApp para equipes de manutenção.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
